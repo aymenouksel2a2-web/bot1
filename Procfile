@@ -1,0 +1,1 @@
+Procfileweb: gunicorn app:app
