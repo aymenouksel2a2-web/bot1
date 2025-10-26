@@ -7,7 +7,7 @@ Telegram ID Bot - معرفة معرف تيليجرام
 from flask import Flask, request
 import requests
 
-BOT_TOKEN = "8288789847:AAHSGOPiKHtZU1b3qpfoz5h4ByeUTco0gv8"
+BOT_TOKEN = "8211273419:AAG62k2EXmwGYLpQ1DkpnZfFxNC58O8-Sk4"
 
 app = Flask(__name__)
 
