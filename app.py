@@ -21,7 +21,7 @@ SNI_HOST = "youtube.com"
 # المنافذ المحسنة للفحص
 SCAN_PORTS = [3128, 33080] 
 
-# نطاقات جوجل
+# نطاقات جوجل (مكان البحث)
 GCP_PREFIXES = [
     '34.80', '34.81', '34.82', '34.83', '34.84', '34.85', '34.86', '34.87', '34.88', '34.89', '34.90', '34.91', '34.92',
     '35.185', '35.186', '35.187', '35.188', '35.190', '35.191', '35.192', '35.200', '35.201', '35.202',
@@ -33,10 +33,14 @@ GCP_PREFIXES = [
 scanning_active = False
 scanner_thread = None
 current_chat_id = None
-found_count = 0
 
-# عدد الاتصالات المتزامنة (3 للسلامة على Render)
-MAX_CONCURRENT_SCANS = 3
+# العدادات
+found_count = 0
+invalid_count = 0 # متغير جديد لحساب النتائج المرفوضة
+
+# --- إعدادات السرعة (Koyeb Optimized) ---
+# رفعت القيمة إلى 25 لأن Koyeb أقوى وأقرب جغرافياً من Render
+MAX_CONCURRENT_SCANS = 25
 
 app = Flask(__name__)
 
@@ -47,7 +51,7 @@ KEYBOARD = {
 }
 
 # ==========================================
-# --- منطق البحث والحقن (Strict Mode) ---
+# --- منطق البحث والحقن (Strict Mode + Counters) ---
 # ==========================================
 
 def generate_random_ip():
@@ -56,12 +60,20 @@ def generate_random_ip():
     return f"{prefix}.{suffix}"
 
 def check_single_proxy(ip, port):
+    """
+    فحص دقيق وتسجيل الإحصائيات
+    """
+    global invalid_count # الوصول للمتغير العام لزيادة العداد عند الفشل
+    
     sock = None
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(2.0)
+        sock.settimeout(1.5) # 1.5 ثانية تكفي مع قرب السيرفر الألماني
+        
+        # 1. الاتصال
         sock.connect((ip, port))
         
+        # 2. حقن التوجيه
         payload = (
             f"CONNECT {TARGET_HOST}:{TARGET_PORT} HTTP/1.1\r\n"
             f"Host: {SNI_HOST}\r\n\r\n"
@@ -69,17 +81,25 @@ def check_single_proxy(ip, port):
         sock.sendall(payload.encode())
         response = sock.recv(4096).decode('utf-8', errors='ignore')
         
-        # الفحص الصارم
+        # 3. الفحص الصارم (Strict Filtering)
         if "Connection established" not in response:
-            return False, None
-        if "<html" in response.lower() or "<body" in response.lower():
-            return False, None
-        if "Server:" in response:
+            invalid_count += 1 # فشل الشرط الأول
             return False, None
             
+        if "<html" in response.lower() or "<body" in response.lower():
+            invalid_count += 1 # اكتشف صفحة ويب
+            return False, None
+            
+        if "Server:" in response:
+            invalid_count += 1 # اكتشف خادم عادي
+            return False, None
+            
+        # إذا وصل هنا، فهو بروكسي صالح
         return True, port
             
     except Exception:
+        # خطأ في الاتصال (Timeout, Refused, etc.)
+        invalid_count += 1
         return False, None
     finally:
         if sock:
@@ -98,9 +118,12 @@ def scan_ip_ports(ip):
     return results
 
 def scanner_worker():
-    global scanning_active, found_count
+    """
+    المحرك الرئيسي للبحث
+    """
+    global scanning_active, found_count, invalid_count
     
-    print("✅ Scanner: Started")
+    print("✅ Scanner: Started (Koyeb Mode)")
     send_msg(current_chat_id, "🔥 <b>تم تشغيل الصيد!</b>\n\nجاري البحث عن بروكسي يعمل على نفق `SC-France`...", reply_markup=KEYBOARD)
     
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_SCANS) as executor:
@@ -116,6 +139,7 @@ def scanner_worker():
                     if results:
                         for ip, port in results:
                             found_count += 1
+                            
                             msg = (
                                 f"✅ <b>PROXY FOUND!</b> #{found_count}\n\n"
                                 f"🔌 <b>Proxy:</b> <code>{ip}:{port}</code>\n"
@@ -126,16 +150,21 @@ def scanner_worker():
                             )
                             send_msg(current_chat_id, msg, reply_markup=KEYBOARD)
                             print(f"[+] HIT: {ip}:{port}")
-                            time.sleep(0.5)
+                            time.sleep(0.4)
                 
-                time.sleep(0.1)
+                time.sleep(0.05)
 
             except Exception as e:
                 print(f"Loop Error: {e}")
                 time.sleep(1)
 
-    # إرسال رسالة الإيقاف بعد انتهاء الحلقة (خارج الـ while)
-    send_msg(current_chat_id, f"🛑 <b>تم إيقاف الصيد.</b>\nإجمالي النتائج المكتشفة: {found_count}", reply_markup=KEYBOARD)
+    # رسالة الإيقاف مع ملخص الإحصائيات
+    stop_msg = (
+        f"🛑 <b>تم إيقاف الصيد.</b>\n\n"
+        f"✅ النتائج الصالحة: {found_count}\n"
+        f"❌ النتائج غير الصالحة: {invalid_count}"
+    )
+    send_msg(current_chat_id, stop_msg, reply_markup=KEYBOARD)
     print("❌ Scanner: Stopped")
 
 # ==========================================
@@ -182,7 +211,15 @@ def handle_commands(chat_id, text):
 
     elif text == "/status" or text == "📊 الحالة":
         status_icon = "🟢 نشط" if scanning_active else "🔴 متوقف"
-        status_text = f"📊 <b>تقرير الحالة:</b>\n\nالعمل: {status_icon}\nالنتائج المكتشفة: {found_count}\nالسرعة المتزامنة: {MAX_CONCURRENT_SCANS}"
+        
+        # تقرير الحالة شامل العدادات
+        status_text = (
+            f"📊 <b>تقرير الحالة:</b>\n\n"
+            f"العمل: {status_icon}\n"
+            f"النتائج الصالحة: {found_count}\n"
+            f"النتائج غير الصالحة: {invalid_count}\n"
+            f"السرعة المتزامنة: {MAX_CONCURRENT_SCANS}"
+        )
         send_msg(chat_id, status_text, reply_markup=KEYBOARD)
 
     elif text == "/help" or text == "❓ مساعدة":
@@ -190,7 +227,7 @@ def handle_commands(chat_id, text):
             "🤖 <b>قائمة الأوامر:</b>\n\n"
             "🚀 <b>بدء الصيد:</b> يبدأ البحث عن البروكسيات فوراً.\n"
             "🛑 <b>إيقاف:</b> يوقف عملية البحث ويوفر الموارد.\n"
-            "📊 <b>الحالة:</b> لمعرفة عدد النتائج وحالة البوت.\n\n"
+            "📊 <b>الحالة:</b> لمعرفة عدد النتائج الصالحة والمرفوضة.\n\n"
             "⚡ <b>الوضع:</b> صيد ذكي (يمنع البروكسيات الكاذبة)."
         )
         send_msg(chat_id, help_text, reply_markup=KEYBOARD)
@@ -213,7 +250,7 @@ def set_webhook():
 @app.route('/')
 def home():
     set_webhook()
-    return "✅ Professional Proxy Hunter v2.0"
+    return "✅ Professional Proxy Hunter (Koyeb Optimized)"
 
 @app.route('/' + TOKEN, methods=['POST'])
 def webhook():
