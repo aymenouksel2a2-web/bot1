@@ -41,7 +41,6 @@ MAX_CONCURRENT_SCANS = 3
 app = Flask(__name__)
 
 # --- لوحة المفاتيح (Professional UI) ---
-# تظهر هذه الأزرار للمستخدم بدلاً من كتابة الأوامر
 KEYBOARD = {
     "keyboard": [["🚀 بدء الصيد", "🛑 إيقاف"], ["📊 الحالة", "❓ مساعدة"]],
     "resize_keyboard": True
@@ -57,18 +56,12 @@ def generate_random_ip():
     return f"{prefix}.{suffix}"
 
 def check_single_proxy(ip, port):
-    """
-    فحص دقيق: يرفض السيرفرات الوهمية ويقبل فقط البروكسي الحقيقي
-    """
     sock = None
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(2.0)
-        
-        # 1. الاتصال
         sock.connect((ip, port))
         
-        # 2. حقن التوجيه
         payload = (
             f"CONNECT {TARGET_HOST}:{TARGET_PORT} HTTP/1.1\r\n"
             f"Host: {SNI_HOST}\r\n\r\n"
@@ -76,7 +69,7 @@ def check_single_proxy(ip, port):
         sock.sendall(payload.encode())
         response = sock.recv(4096).decode('utf-8', errors='ignore')
         
-        # 3. الفحص الصارم
+        # الفحص الصارم
         if "Connection established" not in response:
             return False, None
         if "<html" in response.lower() or "<body" in response.lower():
@@ -86,7 +79,7 @@ def check_single_proxy(ip, port):
             
         return True, port
             
-    except:
+    except Exception:
         return False, None
     finally:
         if sock:
@@ -105,9 +98,6 @@ def scan_ip_ports(ip):
     return results
 
 def scanner_worker():
-    """
-    المحرك الرئيسي للبحث
-    """
     global scanning_active, found_count
     
     print("✅ Scanner: Started")
@@ -116,7 +106,6 @@ def scanner_worker():
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_SCANS) as executor:
         while scanning_active:
             try:
-                # تجهيز دفعة من الـ IPs للفحص المتوازي
                 batch = [generate_random_ip() for _ in range(MAX_CONCURRENT_SCANS)]
                 future_to_ip = {executor.submit(scan_ip_ports, ip): ip for ip in batch}
                 
@@ -127,8 +116,6 @@ def scanner_worker():
                     if results:
                         for ip, port in results:
                             found_count += 1
-                            
-                            # رسالة النتيجة
                             msg = (
                                 f"✅ <b>PROXY FOUND!</b> #{found_count}\n\n"
                                 f"🔌 <b>Proxy:</b> <code>{ip}:{port}</code>\n"
@@ -139,11 +126,15 @@ def scanner_worker():
                             )
                             send_msg(current_chat_id, msg, reply_markup=KEYBOARD)
                             print(f"[+] HIT: {ip}:{port}")
-                            time.sleep(0.5) # راحة قصيرة لتجنب حظر تيليجرام
+                            time.sleep(0.5)
                 
-                # راحة بسيطة جداً لتهدئة المعالج
                 time.sleep(0.1)
 
+            except Exception as e:
+                print(f"Loop Error: {e}")
+                time.sleep(1)
+
+    # إرسال رسالة الإيقاف بعد انتهاء الحلقة (خارج الـ while)
     send_msg(current_chat_id, f"🛑 <b>تم إيقاف الصيد.</b>\nإجمالي النتائج المكتشفة: {found_count}", reply_markup=KEYBOARD)
     print("❌ Scanner: Stopped")
 
@@ -152,7 +143,6 @@ def scanner_worker():
 # ==========================================
 
 def send_msg(chat_id, text, reply_markup=None):
-    """دالة إرسال الرسائل"""
     if not chat_id: return
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     try:
@@ -169,12 +159,10 @@ def send_msg(chat_id, text, reply_markup=None):
         print(f"Msg Error: {e}")
 
 def handle_commands(chat_id, text):
-    """معالج الأوامر"""
     global scanning_active, scanner_thread, current_chat_id
     
     text = text.lower()
     
-    # أمر البدء
     if text == "/start" or text == "🚀 بدء الصيد":
         if not scanning_active:
             scanning_active = True
@@ -185,7 +173,6 @@ def handle_commands(chat_id, text):
         else:
             send_msg(chat_id, "⚠️ عملية الصيد قيد التشغيل بالفعل!", reply_markup=KEYBOARD)
 
-    # أمر الإيقاف
     elif text == "/stop" or text == "🛑 إيقاف":
         if scanning_active:
             scanning_active = False
@@ -193,13 +180,11 @@ def handle_commands(chat_id, text):
         else:
             send_msg(chat_id, "🔴 البحث متوقف بالفعل.", reply_markup=KEYBOARD)
 
-    # أمر الحالة
     elif text == "/status" or text == "📊 الحالة":
         status_icon = "🟢 نشط" if scanning_active else "🔴 متوقف"
         status_text = f"📊 <b>تقرير الحالة:</b>\n\nالعمل: {status_icon}\nالنتائج المكتشفة: {found_count}\nالسرعة المتزامنة: {MAX_CONCURRENT_SCANS}"
         send_msg(chat_id, status_text, reply_markup=KEYBOARD)
 
-    # أمر المساعدة
     elif text == "/help" or text == "❓ مساعدة":
         help_text = (
             "🤖 <b>قائمة الأوامر:</b>\n\n"
@@ -215,7 +200,6 @@ def set_webhook():
         base_url = os.environ.get('RENDER_EXTERNAL_URL')
         if base_url:
             webhook_url = f"{base_url}/{TOKEN}"
-            # التحقق قبل الضبط
             res = requests.get(f"https://api.telegram.org/bot{TOKEN}/getWebhookInfo").json()
             if res.get('result', {}).get('url') != webhook_url:
                 requests.post(f"https://api.telegram.org/bot{TOKEN}/setWebhook", json={"url": webhook_url})
@@ -239,7 +223,6 @@ def webhook():
             chat_id = data["message"]["chat"]["id"]
             text = data["message"].get("text", "")
             
-            # معالجة الأوامر
             handle_commands(chat_id, text)
 
         return jsonify({"ok": True})
