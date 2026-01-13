@@ -145,7 +145,6 @@ def scanner_worker():
                 print(f"Loop Error: {e}")
                 time.sleep(1)
 
-    # عند الإيقاف، نحذف آخر تقرير يدوي أو تلقائي إذا وجد ليبدو النظام نظيفاً
     clear_last_status_messages()
     
     stop_msg = (
@@ -157,30 +156,26 @@ def scanner_worker():
     print("❌ Scanner: Stopped")
 
 # ==========================================
-# --- نظام المراقبة والصيانة (Keep Alive) ---
+# --- نظام المراقبة والصيانة ---
 # ==========================================
 
 def keep_alive_worker():
-    """
-    مسار خلفي يعمل باستمرار لمراقبة البوت وتنبيهه كل 50 دقيقة
-    مع خاصية حذف الرسالة القديمة واستبدالها
-    """
     global current_chat_id, found_count, invalid_count, scanning_active, last_auto_report_msg_id
     
     last_report_time = time.time()
     
     while keep_alive_active:
         try:
-            time.sleep(60) # فحص كل دقيقة
+            time.sleep(60)
             
-            # 1. Self-Ping
+            # Self-Ping
             try:
                 port = os.environ.get("PORT", 10000)
                 requests.get(f"http://localhost:{port}/", timeout=5)
             except:
                 pass
 
-            # 2. إرسال التقرير كل 50 دقيقة (3000 ثانية)
+            # تقرير كل 50 دقيقة
             if time.time() - last_report_time >= 3000:
                 if current_chat_id:
                     status_icon = "🟢 نشط" if scanning_active else "🔴 متوقف"
@@ -202,7 +197,6 @@ def keep_alive_worker():
                             f"⚠️ البوت في حالة انتظار."
                         )
                     
-                    # استخدام دالة الاستبدال
                     new_msg_id = send_replace_message(current_chat_id, report_text, last_auto_report_msg_id, KEYBOARD)
                     if new_msg_id:
                         last_auto_report_msg_id = new_msg_id
@@ -212,11 +206,11 @@ def keep_alive_worker():
             print(f"KeepAlive Error: {e}")
 
 # ==========================================
-# --- دوال تيليجرام والتحكم (Professional UI) ---
+# --- دوال تيليجرام والتحكم ---
 # ==========================================
 
 def send_msg(chat_id, text, reply_markup=None):
-    """دالة عادية للإرسال (للرسائل العادية)"""
+    """دالة إرسال عادية"""
     if not chat_id: return
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     try:
@@ -232,19 +226,21 @@ def send_msg(chat_id, text, reply_markup=None):
     except Exception as e:
         print(f"Msg Error: {e}")
 
+def delete_message(chat_id, msg_id):
+    """دالة لحذف رسالة المستخدم"""
+    if not chat_id or not msg_id: return
+    try:
+        requests.post(f"https://api.telegram.org/bot{TOKEN}/deleteMessage", json={"chat_id": chat_id, "message_id": msg_id}, timeout=5)
+    except:
+        pass
+
 def send_replace_message(chat_id, text, old_msg_id=None, reply_markup=None):
-    """
-    دالة احترافية: تحذف الرسالة القديمة، وترسل الجديدة
-    وتعيد رقم الرسالة الجديدة لاستخدامه في الحذف القادم
-    """
-    # 1. محاولة حذف الرسالة القديمة
+    """دالة الاستبدال: تحذف القديم، ترسل الجديد، تعيد رقم الجديد"""
     if old_msg_id:
         try:
             requests.post(f"https://api.telegram.org/bot{TOKEN}/deleteMessage", json={"chat_id": chat_id, "message_id": old_msg_id}, timeout=5)
         except:
-            pass # إذا كانت الرسالة قديمة جداً أو محذوفة، لا نريد توقف البوت
-
-    # 2. إرسال الرسالة الجديدة
+            pass
     try:
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
         payload = {
@@ -256,15 +252,13 @@ def send_replace_message(chat_id, text, old_msg_id=None, reply_markup=None):
         if reply_markup:
             payload["reply_markup"] = reply_markup
         res = requests.post(url, json=payload, timeout=5)
-        
-        # إرجاع رقم الرسالة الجديدة
         return res.json().get("result", {}).get("message_id")
     except Exception as e:
         print(f"Replace Msg Error: {e}")
         return None
 
 def clear_last_status_messages():
-    """تستخدم عند إيقاف البوت لمسح التقاير القديمة"""
+    """حذف جميع رسائل الحالة عند إيقاف البوت"""
     global last_manual_status_msg_id, last_auto_report_msg_id
     if current_chat_id:
         try:
@@ -277,10 +271,18 @@ def clear_last_status_messages():
         except:
             pass
 
-def handle_commands(chat_id, text):
+def handle_commands(chat_id, text, msg_id):
+    """
+    معالج الأوامر
+    msg_id: رقم رسالة المستخدم (لحذفها)
+    """
     global scanning_active, scanner_thread, current_chat_id, last_manual_status_msg_id
     
     text = text.lower()
+    
+    # حذف رسالة المستخدم فوراً لتنظيف الدردشة (App-like feel)
+    if msg_id:
+        delete_message(chat_id, msg_id)
     
     if text == "/start" or text == "🚀 بدء الصيد":
         if not scanning_active:
@@ -310,7 +312,7 @@ def handle_commands(chat_id, text):
             f"السرعة المتزامنة: {MAX_CONCURRENT_SCANS}"
         )
         
-        # استخدام دالة الاستبدال للحالة اليدوية
+        # استخدام الاستبدال هنا
         new_id = send_replace_message(chat_id, status_text, last_manual_status_msg_id, KEYBOARD)
         if new_id:
             last_manual_status_msg_id = new_id
@@ -320,7 +322,7 @@ def handle_commands(chat_id, text):
             "🤖 <b>قائمة الأوامر:</b>\n\n"
             "🚀 <b>بدء الصيد:</b> يبدأ البحث فوراً.\n"
             "🛑 <b>إيقاف:</b> يوقف عملية البحث.\n"
-            "📊 <b>الحالة:</b> تقرير فوري (يتم تحديث الرسالة كل ضغطة).\n\n"
+            "📊 <b>الحالة:</b> تقرير فوري (يتم تحديث الرسالة).\n\n"
             "⏰ <b>ملاحظة:</b> البوت يرسل تقريراً تلقائياً كل 50 دقيقة."
         )
         send_msg(chat_id, help_text, reply_markup=KEYBOARD)
@@ -343,7 +345,7 @@ def set_webhook():
 @app.route('/')
 def home():
     set_webhook()
-    return "✅ Professional Proxy Hunter (Koyeb + Auto-Replace)"
+    return "✅ Professional Proxy Hunter (Koyeb + Auto-Clean)"
 
 @app.route('/' + TOKEN, methods=['POST'])
 def webhook():
@@ -352,7 +354,9 @@ def webhook():
         if "message" in data:
             chat_id = data["message"]["chat"]["id"]
             text = data["message"].get("text", "")
-            handle_commands(chat_id, text)
+            msg_id = data["message"]["message_id"] # استخراج رقم رسالة المستخدم
+            
+            handle_commands(chat_id, text, msg_id)
         return jsonify({"ok": True})
     except Exception as e:
         print(f"Error: {e}")
@@ -361,7 +365,6 @@ def webhook():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     
-    # بدء مسار المراقبة التلقائي
     monitor_thread = threading.Thread(target=keep_alive_worker)
     monitor_thread.daemon = True
     monitor_thread.start()
