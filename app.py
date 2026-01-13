@@ -1,54 +1,59 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+import os
 import requests
-import time
+from flask import Flask, request, jsonify
 
 # التوكن الخاص بك
 TOKEN = "8449140690:AAE6kMOXaKyVdcCi7uQTBHHienL2lWff5Q4"
 
-def send_message(chat_id, text):
-    """دالة لإرسال رسالة"""
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
+app = Flask(__name__)
+
+def set_webhook():
+    """دالة لتجهيز الـ Webhook تلقائياً عند تشغيل البوت"""
     try:
-        requests.post(url, json=payload, timeout=5)
+        # الحصول على الرابط الخاص بـ Render تلقائياً
+        base_url = os.environ.get('RENDER_EXTERNAL_URL')
+        if base_url:
+            webhook_url = f"{base_url}/{TOKEN}"
+            
+            # التحقق مما إذا كان الـ Webhook مضبوطاً من قبل لتجنب التكرار
+            check_req = requests.get(f"https://api.telegram.org/bot{TOKEN}/getWebhookInfo")
+            current_url = check_req.json().get('result', {}).get('url', '')
+            
+            # إذا كان الرابط مختلفاً، قم بتحديثه
+            if current_url != webhook_url:
+                requests.post(f"https://api.telegram.org/bot{TOKEN}/setWebhook", json={"url": webhook_url})
+                print(f"✅ Webhook set to: {webhook_url}")
+            else:
+                print("✅ Webhook is already set correctly.")
+        else:
+            print("⚠️ RENDER_EXTERNAL_URL not found. Running locally?")
     except Exception as e:
-        print(f"Error sending: {e}")
+        print(f"Error setting webhook: {e}")
 
-def main():
-    print("✅ Bot is running...")
-    print("Send any message to the bot now.")
-    
-    # هذا المتغير يمنع تكرار نفس الرسالة
-    offset = 0
-    
-    while True:
-        try:
-            # طلب الرسائل الجديدة من تيليجرام
-            url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
-            params = {"timeout": 30, "offset": offset}
-            response = requests.get(url, params=params)
-            data = response.json()
+@app.route('/')
+def home():
+    # هذه الصفحة تستدعى عند الفحص الصحي (Health Check)، سنستغلها لضبط الـ Webhook
+    set_webhook()
+    return "Bot is running and active!"
 
-            if data["ok"]:
-                for result in data["result"]:
-                    # تحديث الـ offset لننتقل للرسالة التالية
-                    offset = result["update_id"] + 1
-                    
-                    # التأكد من وجود رسالة نصية
-                    if "message" in result:
-                        chat_id = result["message"]["chat"]["id"]
-                        
-                        # طباعة الرسالة في التيرمينال للمتابعة
-                        print(f"Received message from: {chat_id}")
-                        
-                        # الرد بكلمة hi
-                        send_message(chat_id, "hi")
-                        
-        except Exception as e:
-            print(f"Error occurred: {e}")
-            # الانتظار 5 ثواني في حال وجود خطأ ثم المحاولة مجدداً
-            time.sleep(5)
+@app.route('/' + TOKEN, methods=['POST'])
+def webhook():
+    """هذا هو المسار الذي سيرسل منه تيليجرام الرسائل"""
+    try:
+        data = request.json
+        if "message" in data:
+            chat_id = data["message"]["chat"]["id"]
+            
+            # الرد بكلمة hi
+            send_url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+            requests.post(send_url, json={"chat_id": chat_id, "text": "hi"})
+            
+        return jsonify({"ok": True})
+    except Exception as e:
+        print(f"Error: {e}")
+        return jsonify({"ok": False})
 
 if __name__ == "__main__":
-    main()
+    # تشغيل التطبيق على المنفذ الذي تفرضه البيئة (Render يستخدم 10000 عادة)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
