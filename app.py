@@ -16,7 +16,7 @@ TROJAN_PASS = "u1023645402"
 TROJAN_SNI  = "youtube.com"
 
 # 2. بيانات الحقن (Injection Proxy)
-INJECT_HOST = "34.84.22.245"
+INJECT_HOST = "34.41.115.197"
 INJECT_PORT = 3128
 
 # 3. محاكاة الـ Payload
