@@ -3,24 +3,58 @@ import requests
 import json
 import subprocess
 import time
+import signal
 from flask import Flask, request, jsonify
 
 # ==========================================
-# --- 1. إعدادات VPN (VMESS Configuration) ---
+# --- متغيرات عالمية ---
 # ==========================================
-VPN_CONFIG = {
-    "log": {"loglevel": "warning"},
-    "inbounds": [{"port": 10808, "listen": "127.0.0.1", "protocol": "socks", "settings": {"udp": True}}],
-    "outbounds": [
-        {
-            "protocol": "vmess",
+TOKEN = "8449140690:AAE6kMOXaKyVdcCi7uQTBHHienL2lWff5Q4"
+app = Flask(__name__)
+xray_process = None  # لتخزين عملية الـ VPN الحالية
+
+PROXY = {
+    "http": "socks5://127.0.0.1:10808",
+    "https": "socks5://127.0.0.1:10808"
+}
+
+# ==========================================
+# --- دوال التعامل مع Xray ---
+# ==========================================
+
+def parse_user_config(user_json):
+    """تحويل JSON المستخدم إلى إعدادات Xray القياسية"""
+    try:
+        data = json.loads(user_json)
+        
+        # استخراج البيانات بناءً على النوع
+        if "vlessTunnelConfig" in data or data.get("type") == "VLESS":
+            protocol = "vless"
+            conf = data["vlessTunnelConfig"]["v2rayConfig"]
+        elif "vmessTunnelConfig" in data or data.get("type") == "VMESS":
+            protocol = "vmess"
+            conf = data["vmessTunnelConfig"]["v2rayConfig"]
+        else:
+            return None, "نوع السيرفر غير مدعوم أو JSON غير صحيح"
+
+        # استخراج القيم المشتركة
+        address = conf.get("host") or conf.get("wsHeaderHost")
+        port = int(conf.get("port", 443))
+        uuid = conf.get("uuid")
+        path = conf.get("wsPath", "/")
+        sni = conf.get("serverNameIndication", "")
+        host_header = conf.get("wsHeaderHost", address)
+
+        # بناء هيكل Outbound الخاص بـ Xray
+        outbound = {
+            "protocol": protocol,
             "settings": {
                 "vnext": [{
-                    "address": "w2ilwe-dr7rsvrgza-ue.a.run.app",
-                    "port": 443,
+                    "address": address,
+                    "port": port,
                     "users": [{
-                        "id": "eeee4444-bbbb-3ccc-1eee-eeeeaaaacccc",
-                        "alterId": 0,
+                        "id": uuid,
+                        "encryption": "none",
                         "security": "auto"
                     }]
                 }]
@@ -29,52 +63,68 @@ VPN_CONFIG = {
                 "network": "ws",
                 "security": "tls",
                 "tlsSettings": {
-                    "serverName": "youtube.com",
-                    "allowInsecure": False
+                    "serverName": sni,
+                    "allowInsecure": True
                 },
                 "wsSettings": {
-                    "path": "/Telegram/@w2ilwe/@x_3_o_x",
+                    "path": path,
                     "headers": {
-                        "Host": "w2ilwe-dr7rsvrgza-ue.a.run.app"
+                        "Host": host_header
                     }
                 }
             }
         }
-    ]
-}
+        
+        # إضافة alterId إذا كان VMESS
+        if protocol == "vmess":
+            outbound["settings"]["vnext"][0]["users"][0]["alterId"] = 0
 
-def start_vpn():
-    xray_path = "./xray"
-    if not os.path.exists(xray_path):
-        print("Xray binary not found! Check Dockerfile.")
-        return
+        # تجميع ملف Config الكامل
+        final_config = {
+            "log": {"loglevel": "warning"},
+            "inbounds": [{"port": 10808, "listen": "127.0.0.1", "protocol": "socks", "settings": {"udp": True}}],
+            "outbounds": [outbound]
+        }
+        
+        return final_config, None
 
+    except Exception as e:
+        return None, f"خطأ في تحليل البيانات: {str(e)}"
+
+def restart_vpn(config_dict):
+    """إعادة تشغيل الـ VPN بالإعدادات الجديدة"""
+    global xray_process
+    
+    # 1. إيقاف العملية القديمة إن وجدت
+    if xray_process:
+        try:
+            os.kill(xray_process.pid, signal.SIGTERM)
+            xray_process.wait()
+        except:
+            pass
+    
+    # 2. كتابة ملف الإعدادات
     with open("config.json", "w") as f:
-        json.dump(VPN_CONFIG, f, indent=4)
+        json.dump(config_dict, f, indent=4)
+        
+    # 3. تشغيل العملية الجديدة
+    xray_path = "./xray"
+    if os.path.exists(xray_path):
+        xray_process = subprocess.Popen([xray_path, "-c", "config.json"])
+        time.sleep(2) # انتظار التشغيل
+        return True
+    return False
 
-    subprocess.Popen([xray_path, "-c", "config.json"])
-    print(">>> VPN Started on 127.0.0.1:10808")
-    time.sleep(3) 
-
-# ==========================================
-# --- 2. إعدادات البوت ---
-# ==========================================
-TOKEN = "8449140690:AAE6kMOXaKyVdcCi7uQTBHHienL2lWff5Q4"
-app = Flask(__name__)
-
-PROXY = {
-    "http": "socks5://127.0.0.1:10808",
-    "https": "socks5://127.0.0.1:10808"
-}
-
-def get_connection_info():
+def check_connection():
     """فحص الاتصال عبر البروكسي"""
     try:
-        # محاولة الاتصال عبر الـ VPN
-        response = requests.get("http://ip-api.com/json", proxies=PROXY, timeout=5)
+        start_time = time.time()
+        response = requests.get("http://ip-api.com/json", proxies=PROXY, timeout=8)
+        ping = int((time.time() - start_time) * 1000)
         data = response.json()
         return {
             "success": True,
+            "ping": ping,
             "ip": data.get("query", "Unknown"),
             "country": data.get("country", "Unknown"),
             "isp": data.get("isp", "Unknown")
@@ -82,25 +132,20 @@ def get_connection_info():
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-def send_msg(chat_id, text, use_vpn=True):
-    """
-    دالة ذكية للإرسال:
-    تحاول الإرسال عبر VPN أولاً، إذا فشلت ترسل عبر النت العادي
-    """
+# ==========================================
+# --- دوال البوت ---
+# ==========================================
+
+def send_msg(chat_id, text, use_vpn=False):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    
-    if use_vpn:
-        try:
-            # محاولة الإرسال عبر الـ VPN
-            requests.post(url, json={"chat_id": chat_id, "text": text}, proxies=PROXY, timeout=5)
-        except Exception as e:
-            print(f"VPN Send Failed: {e}")
-            # إذا فشل، نعيد المحاولة بدون VPN لنخبر المستخدم
-            fallback_text = f"⚠️ **فشل الـ VPN!**\n\nحاولت الرد عليك عبر الـ VPN ولكن السيرفر لا يعمل.\nالخطأ: {e}\n\n(هذه الرسالة مرسلة عبر الاتصال المباشر)"
-            requests.post(url, json={"chat_id": chat_id, "text": fallback_text})
-    else:
-        # إرسال مباشر (بدون VPN)
-        requests.post(url, json={"chat_id": chat_id, "text": text})
+    try:
+        # نحاول الإرسال المباشر لضمان الوصول إلا إذا طلبنا تجربة الـ VPN
+        proxies = PROXY if use_vpn else None
+        requests.post(url, json={"chat_id": chat_id, "text": text}, proxies=proxies, timeout=5)
+    except:
+        # محاولة احتياطية بدون بروكسي
+        if use_vpn:
+            requests.post(url, json={"chat_id": chat_id, "text": text})
 
 def set_webhook():
     try:
@@ -114,7 +159,7 @@ def set_webhook():
 
 @app.route('/')
 def home():
-    return "Bot is running..."
+    return "Bot is running with Dynamic Config Support"
 
 @app.route('/' + TOKEN, methods=['POST'])
 def webhook():
@@ -124,32 +169,54 @@ def webhook():
             chat_id = data["message"]["chat"]["id"]
             text = data["message"].get("text", "")
             
+            # --- أمر /start ---
             if text == "/start":
-                # إشعار للمستخدم أن الفحص جاري (بدون VPN لضمان الوصول)
-                send_msg(chat_id, "جاري تجربة الاتصال... ⏳", use_vpn=False)
+                send_msg(chat_id, "أهلاً بك! 🛠\nأرسل الإعدادات بصيغة JSON باستخدام الأمر:\n`/add {json...}`\n\nوسأقوم بتجربة الاتصال فوراً.")
+
+            # --- أمر /add ---
+            elif text.startswith("/add"):
+                raw_json = text.replace("/add", "", 1).strip()
                 
-                info = get_connection_info()
+                if not raw_json:
+                    send_msg(chat_id, "⚠️ خطأ: يرجى وضع كود JSON بعد الأمر.")
+                    return jsonify({"ok": True})
+
+                send_msg(chat_id, "⚙️ جاري تحليل الإعدادات وتشغيل السيرفر...")
                 
-                if info["success"]:
-                    msg = (
-                        f"✅ **اتصال VMESS ناجح!**\n\n"
-                        f"🌍 الدولة: {info['country']}\n"
-                        f"📟 الآي بي: `{info['ip']}`\n"
-                        f"🏢 المزود: {info['isp']}"
-                    )
-                    # نرسل النتيجة عبر الـ VPN لإثبات أنه يعمل
-                    send_msg(chat_id, msg, use_vpn=True)
+                # 1. تحليل JSON
+                new_config, error = parse_user_config(raw_json)
+                
+                if error:
+                    send_msg(chat_id, f"❌ فشل تحليل الكود:\n{error}")
+                    return jsonify({"ok": True})
+                
+                # 2. تشغيل الـ VPN
+                if restart_vpn(new_config):
+                    # 3. فحص الاتصال
+                    info = check_connection()
+                    
+                    if info["success"]:
+                        msg = (
+                            f"✅ **تم الاتصال بنجاح!**\n\n"
+                            f"⚡️ البينج: `{info['ping']}ms`\n"
+                            f"🌍 الدولة: {info['country']}\n"
+                            f"📟 الآي بي: `{info['ip']}`\n"
+                            f"🏢 المزود: {info['isp']}"
+                        )
+                        send_msg(chat_id, msg)
+                    else:
+                        msg = f"❌ **السيرفر لا يعمل!**\nالسبب: {info['error']}"
+                        send_msg(chat_id, msg)
                 else:
-                    msg = f"❌ **السيرفر لا يعمل!**\nالخطأ: {info['error']}"
-                    # نرسل الخطأ عبر الاتصال العادي
-                    send_msg(chat_id, msg, use_vpn=False)
-                
+                    send_msg(chat_id, "❌ خطأ داخلي: لم يتم العثور على ملف xray.")
+
         return jsonify({"ok": True})
-    except:
+    except Exception as e:
+        print(e)
         return jsonify({"ok": False})
 
 if __name__ == "__main__":
-    start_vpn()
+    # تشغيل ملف Dockerfile سيضمن وجود xray
     set_webhook()
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
