@@ -1,351 +1,89 @@
 import os
 import requests
-import socket
-import random
-import threading
+import json
+import subprocess
 import time
+import threading
 from flask import Flask, request, jsonify
-from concurrent.futures import ThreadPoolExecutor
-import concurrent.futures
 
 # ==========================================
-# --- الإعدادات والبيانات ---
+# --- 1. إعدادات VPN (VLESS Configuration) ---
 # ==========================================
-TOKEN = "8449140690:AAE6kMOXaKyVdcCi7uQTBHHienL2lWff5Q4"
-
-# هدف البحث
-TARGET_HOST = "SC-France1.09vpn.com"
-TARGET_PORT = 2083
-SNI_HOST = "youtube.com"
-
-SCAN_PORTS = [3128, 33080] 
-
-GCP_PREFIXES = [
-    '34.80', '34.81', '34.82', '34.83', '34.84', '34.85', '34.86', '34.87', '34.88', '34.89', '34.90', '34.91', '34.92',
-    '35.185', '35.186', '35.187', '35.188', '35.190', '35.191', '35.192', '35.200', '35.201', '35.202',
-    '104.196', '104.197', '104.198', '104.199',
-    '35.240', '35.241', '35.242', '35.243', '35.244'
-]
-
-# حالة البوت
-scanning_active = False
-scanner_thread = None
-current_chat_id = None
-keep_alive_active = True
-
-# العدادات
-found_count = 0
-invalid_count = 0
-
-# تخزين أرقام رسائل الحالة (للاستبدال)
-last_manual_status_msg_id = None
-last_auto_report_msg_id = None
-
-# إعدادات السرعة
-MAX_CONCURRENT_SCANS = 25
-
-app = Flask(__name__)
-
-# --- لوحة المفاتيح ---
-KEYBOARD = {
-    "keyboard": [["🚀 بدء الصيد", "🛑 إيقاف"], ["📊 الحالة", "❓ مساعدة"]],
-    "resize_keyboard": True
+VLESS_CONFIG = {
+    "log": {"loglevel": "warning"},
+    "inbounds": [{"port": 10808, "listen": "127.0.0.1", "protocol": "socks", "settings": {"udp": True}}],
+    "outbounds": [
+        {
+            "protocol": "vless",
+            "settings": {
+                "vnext": [{
+                    "address": "server8-28405491988.europe-west1.run.app",
+                    "port": 443,
+                    "users": [{"id": "d7d687f9-2eae-49e5-aa6c-5eefa8b4d018", "encryption": "none"}]
+                }]
+            },
+            "streamSettings": {
+                "network": "ws",
+                "security": "tls",
+                "tlsSettings": {"serverName": "yt3.ggpht.com", "allowInsecure": False},
+                "wsSettings": {"path": "/", "headers": {"Host": "server8-28405491988.europe-west1.run.app"}}
+            }
+        }
+    ]
 }
 
-# ==========================================
-# --- منطق البحث والحقن ---
-# ==========================================
+# تشغيل الـ VPN في الخلفية
+def start_vpn():
+    xray_path = "./xray" # سيتم توفيره عبر Dockerfile
+    if not os.path.exists(xray_path):
+        print("Xray binary not found! Check Dockerfile.")
+        return
 
-def generate_random_ip():
-    prefix = random.choice(GCP_PREFIXES)
-    suffix = f"{random.randint(0, 255)}.{random.randint(1, 254)}"
-    return f"{prefix}.{suffix}"
+    with open("config.json", "w") as f:
+        json.dump(VLESS_CONFIG, f, indent=4)
 
-def check_single_proxy(ip, port):
-    global invalid_count
-    sock = None
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(1.5)
-        sock.connect((ip, port))
-        
-        payload = (
-            f"CONNECT {TARGET_HOST}:{TARGET_PORT} HTTP/1.1\r\n"
-            f"Host: {SNI_HOST}\r\n\r\n"
-        )
-        sock.sendall(payload.encode())
-        response = sock.recv(4096).decode('utf-8', errors='ignore')
-        
-        # الفلترة الصارمة
-        if "Connection established" not in response:
-            invalid_count += 1
-            return False, None
-        if "<html" in response.lower() or "<body" in response.lower():
-            invalid_count += 1
-            return False, None
-        if "Server:" in response:
-            invalid_count += 1
-            return False, None
-            
-        return True, port
-            
-    except Exception:
-        invalid_count += 1
-        return False, None
-    finally:
-        if sock:
-            try:
-                sock.close()
-            except:
-                pass
-
-def scan_ip_ports(ip):
-    results = []
-    for port in SCAN_PORTS:
-        if not scanning_active: break
-        success, p = check_single_proxy(ip, port)
-        if success:
-            results.append((ip, p))
-    return results
-
-def scanner_worker():
-    global scanning_active, found_count
-    
-    print("✅ Scanner: Started")
-    send_msg(current_chat_id, "🔥 <b>تم تشغيل الصيد!</b>\n\nجاري البحث عن بروكسي يعمل على نفق `SC-France`...", reply_markup=KEYBOARD)
-    
-    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_SCANS) as executor:
-        while scanning_active:
-            try:
-                batch = [generate_random_ip() for _ in range(MAX_CONCURRENT_SCANS)]
-                future_to_ip = {executor.submit(scan_ip_ports, ip): ip for ip in batch}
-                
-                for future in concurrent.futures.as_completed(future_to_ip):
-                    if not scanning_active: break
-                    
-                    results = future.result()
-                    if results:
-                        for ip, port in results:
-                            found_count += 1
-                            msg = (
-                                f"✅ <b>PROXY FOUND!</b> #{found_count}\n\n"
-                                f"🔌 <b>Proxy:</b> <code>{ip}:{port}</code>\n"
-                                f"🎯 <b>Target:</b> <code>{TARGET_HOST}:{TARGET_PORT}</code>\n"
-                                f"🔓 <b>SNI:</b> <code>{SNI_HOST}</code>\n"
-                                f"━━━━━━━━━━━━━━━\n"
-                                f"✨ <b>Verified & Working</b>"
-                            )
-                            send_msg(current_chat_id, msg, reply_markup=KEYBOARD)
-                            print(f"[+] HIT: {ip}:{port}")
-                            time.sleep(0.4)
-                
-                time.sleep(0.05)
-
-            except Exception as e:
-                print(f"Loop Error: {e}")
-                time.sleep(1)
-
-    clear_last_status_messages()
-    
-    stop_msg = (
-        f"🛑 <b>تم إيقاف الصيد.</b>\n\n"
-        f"✅ النتائج الصالحة: {found_count}\n"
-        f"❌ النتائج غير الصالحة: {invalid_count}"
-    )
-    send_msg(current_chat_id, stop_msg, reply_markup=KEYBOARD)
-    print("❌ Scanner: Stopped")
+    # تشغيل العملية
+    subprocess.Popen([xray_path, "-c", "config.json"])
+    print(">>> VPN Started on 127.0.0.1:10808")
+    time.sleep(3) # انتظار التجهيز
 
 # ==========================================
-# --- نظام المراقبة والصيانة ---
+# --- 2. إعدادات البوت ---
 # ==========================================
+TOKEN = "8449140690:AAE6kMOXaKyVdcCi7uQTBHHienL2lWff5Q4"
+app = Flask(__name__)
 
-def keep_alive_worker():
-    global current_chat_id, found_count, invalid_count, scanning_active, last_auto_report_msg_id
-    
-    last_report_time = time.time()
-    
-    while keep_alive_active:
-        try:
-            time.sleep(60)
-            
-            # Self-Ping
-            try:
-                port = os.environ.get("PORT", 10000)
-                requests.get(f"http://localhost:{port}/", timeout=5)
-            except:
-                pass
+# البروكسي الذي سيستخدمه البوت للاتصال بتيليجرام
+PROXY = {
+    "http": "socks5://127.0.0.1:10808",
+    "https": "socks5://127.0.0.1:10808"
+}
 
-            # تقرير كل 50 دقيقة
-            if time.time() - last_report_time >= 3000:
-                if current_chat_id:
-                    status_icon = "🟢 نشط" if scanning_active else "🔴 متوقف"
-                    
-                    if scanning_active:
-                        report_text = (
-                            f"⏰ <b>تقرير تلقائي (50 دقيقة):</b>\n\n"
-                            f"العمل: {status_icon}\n"
-                            f"النتائج الصالحة: {found_count}\n"
-                            f"النتائج غير الصالحة: {invalid_count}\n"
-                            f"🔄 النظام يعمل بكفاءة."
-                        )
-                    else:
-                        report_text = (
-                            f"⏰ <b>تقرير تلقائي (50 دقيقة):</b>\n\n"
-                            f"العمل: {status_icon}\n"
-                            f"النتائج الصالحة: {found_count}\n"
-                            f"النتائج غير الصالحة: {invalid_count}\n"
-                            f"⚠️ البوت في حالة انتظار."
-                        )
-                    
-                    new_msg_id = send_replace_message(current_chat_id, report_text, last_auto_report_msg_id, KEYBOARD)
-                    if new_msg_id:
-                        last_auto_report_msg_id = new_msg_id
-                    last_report_time = time.time()
-
-        except Exception as e:
-            print(f"KeepAlive Error: {e}")
-
-# ==========================================
-# --- دوال تيليجرام والتحكم ---
-# ==========================================
-
-def send_msg(chat_id, text, reply_markup=None):
-    """دالة إرسال عادية"""
-    if not chat_id: return
+def send_msg(chat_id, text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     try:
-        payload = {
-            "chat_id": chat_id, 
-            "text": text, 
-            "parse_mode": "HTML", 
-            "disable_web_page_preview": True
-        }
-        if reply_markup:
-            payload["reply_markup"] = reply_markup
-        requests.post(url, json=payload, timeout=5)
+        # نستخدم البروكسي هنا
+        requests.post(url, json={"chat_id": chat_id, "text": text}, proxies=PROXY, timeout=10)
     except Exception as e:
-        print(f"Msg Error: {e}")
-
-def delete_message(chat_id, msg_id):
-    """دالة لحذف رسالة المستخدم"""
-    if not chat_id or not msg_id: return
-    try:
-        requests.post(f"https://api.telegram.org/bot{TOKEN}/deleteMessage", json={"chat_id": chat_id, "message_id": msg_id}, timeout=5)
-    except:
-        pass
-
-def send_replace_message(chat_id, text, old_msg_id=None, reply_markup=None):
-    """دالة الاستبدال: تحذف القديم، ترسل الجديد، تعيد رقم الجديد"""
-    if old_msg_id:
-        try:
-            requests.post(f"https://api.telegram.org/bot{TOKEN}/deleteMessage", json={"chat_id": chat_id, "message_id": old_msg_id}, timeout=5)
-        except:
-            pass
-    try:
-        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        payload = {
-            "chat_id": chat_id, 
-            "text": text, 
-            "parse_mode": "HTML", 
-            "disable_web_page_preview": True
-        }
-        if reply_markup:
-            payload["reply_markup"] = reply_markup
-        res = requests.post(url, json=payload, timeout=5)
-        return res.json().get("result", {}).get("message_id")
-    except Exception as e:
-        print(f"Replace Msg Error: {e}")
-        return None
-
-def clear_last_status_messages():
-    """حذف جميع رسائل الحالة عند إيقاف البوت"""
-    global last_manual_status_msg_id, last_auto_report_msg_id
-    if current_chat_id:
-        try:
-            if last_manual_status_msg_id:
-                requests.post(f"https://api.telegram.org/bot{TOKEN}/deleteMessage", json={"chat_id": current_chat_id, "message_id": last_manual_status_msg_id})
-                last_manual_status_msg_id = None
-            if last_auto_report_msg_id:
-                requests.post(f"https://api.telegram.org/bot{TOKEN}/deleteMessage", json={"chat_id": current_chat_id, "message_id": last_auto_report_msg_id})
-                last_auto_report_msg_id = None
-        except:
-            pass
-
-def handle_commands(chat_id, text, msg_id):
-    """
-    معالج الأوامر
-    msg_id: رقم رسالة المستخدم (لحذفها)
-    """
-    global scanning_active, scanner_thread, current_chat_id, last_manual_status_msg_id
-    
-    text = text.lower()
-    
-    # حذف رسالة المستخدم فوراً لتنظيف الدردشة (App-like feel)
-    if msg_id:
-        delete_message(chat_id, msg_id)
-    
-    if text == "/start" or text == "🚀 بدء الصيد":
-        if not scanning_active:
-            scanning_active = True
-            current_chat_id = chat_id
-            scanner_thread = threading.Thread(target=scanner_worker)
-            scanner_thread.daemon = True
-            scanner_thread.start()
-        else:
-            send_msg(chat_id, "⚠️ عملية الصيد قيد التشغيل بالفعل!", reply_markup=KEYBOARD)
-
-    elif text == "/stop" or text == "🛑 إيقاف":
-        if scanning_active:
-            scanning_active = False
-            send_msg(chat_id, "⏸ جاري إيقاف البحث...", reply_markup=KEYBOARD)
-        else:
-            send_msg(chat_id, "🔴 البحث متوقف بالفعل.", reply_markup=KEYBOARD)
-
-    elif text == "/status" or text == "📊 الحالة":
-        status_icon = "🟢 نشط" if scanning_active else "🔴 متوقف"
-        
-        status_text = (
-            f"📊 <b>تقرير الحالة الفوري:</b>\n\n"
-            f"العمل: {status_icon}\n"
-            f"النتائج الصالحة: {found_count}\n"
-            f"النتائج غير الصالحة: {invalid_count}\n"
-            f"السرعة المتزامنة: {MAX_CONCURRENT_SCANS}"
-        )
-        
-        # استخدام الاستبدال هنا
-        new_id = send_replace_message(chat_id, status_text, last_manual_status_msg_id, KEYBOARD)
-        if new_id:
-            last_manual_status_msg_id = new_id
-
-    elif text == "/help" or text == "❓ مساعدة":
-        help_text = (
-            "🤖 <b>قائمة الأوامر:</b>\n\n"
-            "🚀 <b>بدء الصيد:</b> يبدأ البحث فوراً.\n"
-            "🛑 <b>إيقاف:</b> يوقف عملية البحث.\n"
-            "📊 <b>الحالة:</b> تقرير فوري (يتم تحديث الرسالة).\n\n"
-            "⏰ <b>ملاحظة:</b> البوت يرسل تقريراً تلقائياً كل 50 دقيقة."
-        )
-        send_msg(chat_id, help_text, reply_markup=KEYBOARD)
+        print(f"Error sending msg: {e}")
 
 def set_webhook():
+    """ضبط الويب هوك تلقائياً"""
     try:
-        base_url = os.environ.get('RENDER_EXTERNAL_URL')
+        # Koyeb يوفر هذا المتغير تلقائياً
+        base_url = os.environ.get('KOYEB_APP_URL') 
         if base_url:
+            if base_url.endswith('/'): base_url = base_url[:-1]
             webhook_url = f"{base_url}/{TOKEN}"
-            res = requests.get(f"https://api.telegram.org/bot{TOKEN}/getWebhookInfo").json()
-            if res.get('result', {}).get('url') != webhook_url:
-                requests.post(f"https://api.telegram.org/bot{TOKEN}/setWebhook", json={"url": webhook_url})
+            # الويب هوك نرسله بدون بروكسي لضمان الوصول
+            requests.post(f"https://api.telegram.org/bot{TOKEN}/setWebhook", json={"url": webhook_url})
+            print(f"Webhook set to: {webhook_url}")
     except:
         pass
-
-# ==========================================
-# --- تشغيل السيرفر ---
-# ==========================================
 
 @app.route('/')
 def home():
-    set_webhook()
-    return "✅ Professional Proxy Hunter (Koyeb + Auto-Clean)"
+    return "Bot is running on VLESS Tunnel"
 
 @app.route('/' + TOKEN, methods=['POST'])
 def webhook():
@@ -354,19 +92,16 @@ def webhook():
         if "message" in data:
             chat_id = data["message"]["chat"]["id"]
             text = data["message"].get("text", "")
-            msg_id = data["message"]["message_id"] # استخراج رقم رسالة المستخدم
             
-            handle_commands(chat_id, text, msg_id)
+            if text == "/start":
+                send_msg(chat_id, "Hello! I am connected via VLESS VPN 🛡️")
+                
         return jsonify({"ok": True})
-    except Exception as e:
-        print(f"Error: {e}")
+    except:
         return jsonify({"ok": False})
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    
-    monitor_thread = threading.Thread(target=keep_alive_worker)
-    monitor_thread.daemon = True
-    monitor_thread.start()
-    
-    app.run(host='0.0.0.0', port=port, threaded=True)
+    start_vpn() # تشغيل الـ VPN أولاً
+    set_webhook()
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
