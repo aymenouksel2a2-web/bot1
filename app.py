@@ -4,7 +4,7 @@ import json
 import subprocess
 import time
 import signal
-import re # مكتبة للتعامل مع النصوص بذكاء
+import re
 from flask import Flask, request, jsonify
 
 # ==========================================
@@ -20,20 +20,21 @@ PROXY = {
 }
 
 # ==========================================
-# --- معالجة Xray والذكاء في التصحيح ---
+# --- معالجة Xray (VLESS / VMESS / TROJAN) ---
 # ==========================================
 
 def parse_user_config(user_json):
-    """تحويل JSON المستخدم إلى إعدادات Xray مع تصحيح الأخطاء تلقائياً"""
+    """تحويل JSON المستخدم إلى إعدادات Xray مع دعم Trojan"""
     try:
-        # تنظيف النص من أي زيادات
         user_json = user_json.strip()
         data = json.loads(user_json)
         
-        # تحديد البروتوكول (VLESS أو VMESS)
+        protocol = ""
+        conf = {}
+
+        # 1. تحديد البروتوكول واستخراج الكونفيج الخام
         if "vlessTunnelConfig" in data or data.get("type") == "VLESS":
             protocol = "vless"
-            # دعم صيغ مختلفة للـ JSON (سواء كانت مباشرة أو داخل هيكل Dark Tunnel)
             if "vlessTunnelConfig" in data:
                 conf = data["vlessTunnelConfig"].get("v2rayConfig", data["vlessTunnelConfig"])
             else:
@@ -45,62 +46,85 @@ def parse_user_config(user_json):
                 conf = data["vmessTunnelConfig"].get("v2rayConfig", data["vmessTunnelConfig"])
             else:
                 conf = data
+        
+        # --- إضافة دعم TROJAN هنا ---
+        elif "trojanTunnelConfig" in data or data.get("type") == "TROJAN":
+            protocol = "trojan"
+            if "trojanTunnelConfig" in data:
+                conf = data["trojanTunnelConfig"].get("v2rayConfig", data["trojanTunnelConfig"])
+            else:
+                conf = data
         else:
-            return None, "نوع السيرفر غير مدعوم أو JSON غير صحيح"
+            return None, "نوع السيرفر غير مدعوم (Unsupported Protocol)"
 
-        # استخراج البيانات
+        # 2. استخراج البيانات المشتركة
         address = conf.get("host") or conf.get("address") or conf.get("wsHeaderHost")
         port = int(conf.get("port", 443))
-        uuid = conf.get("uuid") or conf.get("id")
+        
+        # Trojan يستخدم password، بينما Vless/Vmess يستخدمون id/uuid
+        # سنحاول استخراج أيهما موجود
+        uuid_or_password = conf.get("password") or conf.get("uuid") or conf.get("id")
+        
         path = conf.get("wsPath") or conf.get("path") or "/"
         sni = conf.get("serverNameIndication") or conf.get("sni") or ""
         host_header = conf.get("wsHeaderHost") or conf.get("host") or address
 
-        # ---------------------------------------------------------
-        # 🧠 [الذكاء الإصطناعي] تصحيح التمويه (SNI Fixer)
-        # المشكلة: Koyeb لا يحتاج تمويه، والتمويه يكسر اتصال Google Cloud
-        # الحل: إذا كان السيرفر run.app والـ SNI هو youtube.com -> اجعل SNI هو العنوان الحقيقي
-        # ---------------------------------------------------------
-        if "run.app" in address and ("youtube" in sni or "google" in sni):
+        # 3. تصحيح SNI الذكي (لإعدادات Cloud Run)
+        if address and "run.app" in address and ("youtube" in sni or "google" in sni):
             print(f">>> Auto-Fixing SNI: Changed from {sni} to {address}")
             sni = address
-            host_header = address # توحيد الهوست لضمان الاتصال
-        # ---------------------------------------------------------
+            host_header = address
 
-        # بناء هيكل Outbound
-        outbound = {
-            "protocol": protocol,
-            "settings": {
+        # 4. بناء هيكل الإعدادات (Settings) حسب البروتوكول
+        outbound_settings = {}
+        
+        if protocol == "trojan":
+            # هيكل Trojan يختلف قليلاً (servers بدلاً من vnext)
+            outbound_settings = {
+                "servers": [{
+                    "address": address,
+                    "port": port,
+                    "password": uuid_or_password,
+                    "email": "trojan@xray.com" # مجرد حقل شكلي
+                }]
+            }
+        else:
+            # هيكل VMESS و VLESS
+            outbound_settings = {
                 "vnext": [{
                     "address": address,
                     "port": port,
                     "users": [{
-                        "id": uuid,
+                        "id": uuid_or_password,
                         "encryption": "none",
                         "security": "auto"
                     }]
                 }]
-            },
+            }
+            # إضافة alterId لـ VMESS فقط
+            if protocol == "vmess":
+                outbound_settings["vnext"][0]["users"][0]["alterId"] = 0
+
+        # 5. تجميع الـ Outbound النهائي
+        outbound = {
+            "protocol": protocol,
+            "settings": outbound_settings,
             "streamSettings": {
-                "network": "ws",
+                "network": "ws" if path != "/" else "tcp", # تخمين نوع الشبكة
                 "security": "tls",
                 "tlsSettings": {
                     "serverName": sni,
-                    "allowInsecure": True, # السماح بالشهادات غير الموثوقة قليلاً لتجنب المشاكل
-                    "fingerprint": "chrome" # محاولة محاكاة المتصفح
+                    "allowInsecure": True
                 },
                 "wsSettings": {
                     "path": path,
                     "headers": {
                         "Host": host_header
                     }
-                }
+                } if path != "/" else None # إضافة wsSettings فقط إذا كان هناك مسار
             }
         }
         
-        if protocol == "vmess":
-            outbound["settings"]["vnext"][0]["users"][0]["alterId"] = 0
-
         final_config = {
             "log": {"loglevel": "warning"},
             "inbounds": [{"port": 10808, "listen": "127.0.0.1", "protocol": "socks", "settings": {"udp": True}}],
@@ -125,7 +149,6 @@ def restart_vpn(config_dict):
         
     xray_path = "./xray"
     if os.path.exists(xray_path):
-        # استخدام nohup أو تشغيل مستقل لضمان الاستقرار
         xray_process = subprocess.Popen([xray_path, "-c", "config.json"])
         time.sleep(3) 
         return True
@@ -134,7 +157,7 @@ def restart_vpn(config_dict):
 def check_connection():
     try:
         start_time = time.time()
-        # زدنا مدة الانتظار قليلاً لتجنب Read timed out الكاذب
+        # زدنا المهلة لضمان الاتصال
         response = requests.get("http://ip-api.com/json", proxies=PROXY, timeout=10)
         ping = int((time.time() - start_time) * 1000)
         data = response.json()
@@ -155,10 +178,8 @@ def check_connection():
 def send_msg(chat_id, text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     try:
-        # نحاول الإرسال بدون بروكسي أولاً لضمان وصول الرد حتى لو الـ VPN خربان
         requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=5)
-    except:
-        pass
+    except: pass
 
 def set_webhook():
     try:
@@ -170,7 +191,7 @@ def set_webhook():
     except: pass
 
 @app.route('/')
-def home(): return "Bot Running with Auto-Fix 🚀"
+def home(): return "Bot Running with Trojan Support 🚀"
 
 @app.route('/' + TOKEN, methods=['POST'])
 def webhook():
@@ -181,23 +202,24 @@ def webhook():
             text = data["message"].get("text", "")
             
             if text == "/start":
-                send_msg(chat_id, "أرسل كود JSON باستخدام:\n`/add {json}`\n\nوسأقوم بتصحيح إعدادات Google Cloud تلقائياً 😉")
+                send_msg(chat_id, "أهلاً! البوت الآن يدعم:\n✅ VLESS\n✅ VMESS\n✅ TROJAN\n\nأرسل الكود باستخدام `/add` للتجربة.")
 
             elif text.startswith("/add"):
                 raw_json = text.replace("/add", "", 1).strip()
                 if not raw_json: return jsonify({"ok": True})
 
-                send_msg(chat_id, "⚙️ جاري التحليل والاتصال...")
+                send_msg(chat_id, "⚙️ جاري تحليل الإعدادات...")
                 
                 new_config, error = parse_user_config(raw_json)
                 if error:
-                    send_msg(chat_id, f"❌ خطأ JSON:\n{error}")
+                    send_msg(chat_id, f"❌ خطأ:\n{error}")
                 else:
                     if restart_vpn(new_config):
                         info = check_connection()
                         if info["success"]:
                             msg = (
                                 f"✅ **تم الاتصال بنجاح!**\n"
+                                f"📡 البروتوكول: {new_config['outbounds'][0]['protocol'].upper()}\n"
                                 f"⚡️ `{info['ping']}ms` | 🌍 {info['country']}\n"
                                 f"📟 IP: `{info['ip']}`"
                             )
