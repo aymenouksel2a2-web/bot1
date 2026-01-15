@@ -6,26 +6,38 @@ import time
 from flask import Flask, request, jsonify
 
 # ==========================================
-# --- 1. إعدادات VPN (VLESS Configuration) ---
+# --- 1. إعدادات VPN (VMESS Configuration) ---
 # ==========================================
-VLESS_CONFIG = {
+VPN_CONFIG = {
     "log": {"loglevel": "warning"},
     "inbounds": [{"port": 10808, "listen": "127.0.0.1", "protocol": "socks", "settings": {"udp": True}}],
     "outbounds": [
         {
-            "protocol": "vless",
+            "protocol": "vmess", # تغيير البروتوكول هنا
             "settings": {
                 "vnext": [{
-                    "address": "server8-28405491988.europe-west1.run.app",
+                    "address": "w2ilwe-dr7rsvrgza-ue.a.run.app", # الهوست الجديد
                     "port": 443,
-                    "users": [{"id": "d7d687f9-2eae-49e5-aa6c-5eefa8b4d018", "encryption": "none"}]
+                    "users": [{
+                        "id": "eeee4444-bbbb-3ccc-1eee-eeeeaaaacccc", # UUID الجديد
+                        "alterId": 0, # ضروري لبروتوكول VMESS
+                        "security": "auto"
+                    }]
                 }]
             },
             "streamSettings": {
                 "network": "ws",
                 "security": "tls",
-                "tlsSettings": {"serverName": "yt3.ggpht.com", "allowInsecure": False},
-                "wsSettings": {"path": "/", "headers": {"Host": "server8-28405491988.europe-west1.run.app"}}
+                "tlsSettings": {
+                    "serverName": "youtube.com", # SNI الجديد
+                    "allowInsecure": False
+                },
+                "wsSettings": {
+                    "path": "/Telegram/@w2ilwe/@x_3_o_x", # المسار الجديد
+                    "headers": {
+                        "Host": "w2ilwe-dr7rsvrgza-ue.a.run.app"
+                    }
+                }
             }
         }
     ]
@@ -37,15 +49,17 @@ def start_vpn():
         print("Xray binary not found! Check Dockerfile.")
         return
 
+    # كتابة الإعدادات الجديدة
     with open("config.json", "w") as f:
-        json.dump(VLESS_CONFIG, f, indent=4)
+        json.dump(VPN_CONFIG, f, indent=4)
 
+    # تشغيل Xray
     subprocess.Popen([xray_path, "-c", "config.json"])
-    print(">>> VPN Started on 127.0.0.1:10808")
+    print(">>> VPN (VMESS) Started on 127.0.0.1:10808")
     time.sleep(3) 
 
 # ==========================================
-# --- 2. إعدادات البوت والتحقق ---
+# --- 2. إعدادات البوت ---
 # ==========================================
 TOKEN = "8449140690:AAE6kMOXaKyVdcCi7uQTBHHienL2lWff5Q4"
 app = Flask(__name__)
@@ -56,25 +70,18 @@ PROXY = {
 }
 
 def get_connection_info():
-    """دالة لفحص معلومات الاتصال الحالية عبر البروكسي"""
+    """فحص الاتصال عبر السيرفر الجديد"""
     try:
-        # نحاول الاتصال بموقع يعطينا معلومات الـ IP
-        # نستخدم البروكسي للتأكد أننا نخرج من الـ VPN
         response = requests.get("http://ip-api.com/json", proxies=PROXY, timeout=10)
         data = response.json()
-        
         return {
             "status": "✅ متصل (Connected)",
             "ip": data.get("query", "Unknown"),
             "country": data.get("country", "Unknown"),
-            "isp": data.get("isp", "Unknown"),
-            "region": data.get("regionName", "Unknown")
+            "isp": data.get("isp", "Unknown")
         }
     except Exception as e:
-        return {
-            "status": "❌ غير متصل (Disconnected)",
-            "error": str(e)
-        }
+        return {"status": "❌ فشل الاتصال", "error": str(e)}
 
 def send_msg(chat_id, text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
@@ -90,16 +97,12 @@ def set_webhook():
             if base_url.endswith('/'): base_url = base_url[:-1]
             webhook_url = f"{base_url}/{TOKEN}"
             requests.post(f"https://api.telegram.org/bot{TOKEN}/setWebhook", json={"url": webhook_url})
-            print(f"Webhook set to: {webhook_url}")
     except:
         pass
 
-# ==========================================
-# --- 3. معالجة الرسائل ---
-# ==========================================
 @app.route('/')
 def home():
-    return "Bot is running on VLESS Tunnel"
+    return "Bot running with VMESS Config"
 
 @app.route('/' + TOKEN, methods=['POST'])
 def webhook():
@@ -110,22 +113,18 @@ def webhook():
             text = data["message"].get("text", "")
             
             if text == "/start":
-                # فحص الاتصال عند كتابة start
-                send_msg(chat_id, "جاري فحص الاتصال... 🔎")
-                
+                send_msg(chat_id, "جاري تجربة سيرفر VMESS الجديد... 🔄")
                 info = get_connection_info()
                 
                 if "error" in info:
-                    msg = f"⚠️ **فشل الاتصال بالـ VPN**\nالخطأ: {info['error']}"
+                    msg = f"⚠️ فشل الاتصال:\n{info['error']}"
                 else:
                     msg = (
-                        f"{info['status']}\n\n"
-                        f"🌍 **الدولة:** {info['country']}\n"
-                        f"🏙️ **المنطقة:** {info['region']}\n"
-                        f"🏢 **موزع الخدمة:** {info['isp']}\n"
-                        f"📟 **الآي بي:** `{info['ip']}`"
+                        f"🚀 **نجح الاتصال بالسيرفر الجديد!**\n\n"
+                        f"🌍 الدولة: {info['country']}\n"
+                        f"📟 الآي بي: `{info['ip']}`\n"
+                        f"🏢 المزود: {info['isp']}"
                     )
-                
                 send_msg(chat_id, msg)
                 
         return jsonify({"ok": True})
