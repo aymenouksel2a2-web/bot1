@@ -16,24 +16,27 @@ from queue import Queue
 TOKEN = "8449140690:AAE6kMOXaKyVdcCi7uQTBHHienL2lWff5Q4"
 app = Flask(__name__)
 
-# بيانات سيرفر التروجان الخاص بك (الثابتة)
+# بيانات سيرفر التروجان
 TROJAN_HOST = "SC-France1.09vpn.com"
 TROJAN_PORT = 2083
 TROJAN_PASS = "u1023645402"
 TROJAN_SNI  = "youtube.com"
 PAYLOAD_HOST = "youtube.com"
 
-# إعدادات الصياد
+# إعدادات الصياد (تمت توسعة النطاقات لزيادة الفرص)
 IP_RANGES = [
-    ("34.64", "34.127"), ("35.184", "35.240"), ("104.154", "104.199"), # نطاقات جوجل
+    ("34.64", "34.127"), ("35.184", "35.240"), ("104.154", "104.199"), 
+    ("34.80", "34.89"), ("35.200", "35.247"), ("130.211", "130.255")
 ]
-PORTS_TO_SCAN = [80, 8080, 3128] # المنافذ المستهدفة
+PORTS_TO_SCAN = [80, 8080, 3128] 
 
-# متغيرات التحكم
+# متغيرات الإحصائيات (الذاكرة الحية)
 HUNTING = False
-SCANNED_COUNT = 0
-VALIDATION_QUEUE = Queue() # طابور البروكسيات التي تنتظر فحص التروجان
-FOUND_WORKING_PROXIES = [] # البروكسيات التي نجحت فعلياً
+SCANNED_COUNT = 0       # عدد ما تم مسحه
+RAW_HITS_COUNT = 0      # عدد ما وجده الصياد (الباب المفتوح)
+TESTED_COUNT = 0        # عدد ما فحصه المحقق
+VALIDATION_QUEUE = Queue() 
+FOUND_WORKING_PROXIES = [] 
 CHAT_ID_TARGET = None
 STATUS_MSG_ID = None
 
@@ -43,19 +46,15 @@ STATUS_MSG_ID = None
 xray_process = None
 
 def restart_xray_with_proxy(proxy_ip, proxy_port):
-    """إعادة تشغيل Xray لاستخدام بروكسي محدد"""
     global xray_process
-    
-    # إيقاف العملية السابقة
     if xray_process:
         try:
             os.kill(xray_process.pid, signal.SIGTERM)
             xray_process.wait()
         except: pass
 
-    # إعداد الكونفيج مع البروكسي المكتشف
     config = {
-        "log": {"loglevel": "error"}, # تقليل السجلات للسرعة
+        "log": {"loglevel": "error"},
         "inbounds": [{"port": 10808, "listen": "127.0.0.1", "protocol": "socks", "settings": {"udp": True}}],
         "outbounds": [
             {
@@ -69,14 +68,14 @@ def restart_xray_with_proxy(proxy_ip, proxy_port):
                     "security": "tls",
                     "tlsSettings": {"serverName": TROJAN_SNI, "allowInsecure": True}
                 },
-                "proxySettings": {"tag": "inject_layer"} # إجبار المرور عبر البروكسي
+                "proxySettings": {"tag": "inject_layer"}
             },
             {
                 "tag": "inject_layer",
                 "protocol": "http",
                 "settings": {
                     "servers": [{"address": proxy_ip, "port": int(proxy_port)}],
-                    "headers": {"Host": PAYLOAD_HOST} # Payload
+                    "headers": {"Host": PAYLOAD_HOST}
                 }
             }
         ]
@@ -88,16 +87,14 @@ def restart_xray_with_proxy(proxy_ip, proxy_port):
     xray_path = "./xray"
     if os.path.exists(xray_path):
         xray_process = subprocess.Popen([xray_path, "-c", "config.json"])
-        time.sleep(2) # انتظار تشغيل السيرفر
+        time.sleep(1.5) 
         return True
     return False
 
 def test_connection_via_vpn():
-    """محاولة الاتصال بالإنترنت عبر الـ VPN"""
     try:
         proxies = {"http": "socks5://127.0.0.1:10808", "https": "socks5://127.0.0.1:10808"}
         start = time.time()
-        # مهلة قصيرة (5 ثواني) لأننا نريد البروكسيات السريعة فقط
         res = requests.get("http://ip-api.com/json", proxies=proxies, timeout=5)
         ping = int((time.time() - start) * 1000)
         return True, ping, res.json().get("country", "Unknown")
@@ -107,7 +104,6 @@ def test_connection_via_vpn():
 # ==========================================
 # --- 3. الصياد السريع (Async Hunter) ---
 # ==========================================
-# بايلود الفحص الأولي (فقط للتأكد أن البروكسي مفتوح)
 RAW_PAYLOAD = (
     b"CONNECT youtube.com:443 HTTP/1.1\r\n"
     b"Host: youtube.com\r\n"
@@ -121,7 +117,7 @@ def generate_ip():
     return f"{base_start.split('.')[0]}.{random.randint(start, end)}.{random.randint(0, 255)}.{random.randint(0, 255)}"
 
 async def scan_socket(ip, port, sem):
-    global SCANNED_COUNT
+    global SCANNED_COUNT, RAW_HITS_COUNT
     async with sem:
         SCANNED_COUNT += 1
         try:
@@ -133,13 +129,14 @@ async def scan_socket(ip, port, sem):
             writer.close()
             await writer.wait_closed()
             
-            # إذا استجاب البروكسي بـ 200 OK، نرسله للمحقق
+            # إذا وجدنا استجابة إيجابية
             if "200 Connection" in response or "200 OK" in response:
+                RAW_HITS_COUNT += 1  # زيادة عداد Hits المفتوحة
                 VALIDATION_QUEUE.put((ip, port))
         except: pass
 
 async def hunter_loop():
-    sem = asyncio.Semaphore(500) # سرعة الفحص
+    sem = asyncio.Semaphore(600) 
     print(">>> Hunter Started 🚀")
     while HUNTING:
         tasks = []
@@ -158,17 +155,14 @@ def start_async_loop(loop):
 # --- 4. المحقق (Validator Thread) ---
 # ==========================================
 def validator_worker():
-    """خيط منفصل يقوم بتجربة البروكسيات المكتشفة داخل Trojan"""
-    global CHAT_ID_TARGET
+    global CHAT_ID_TARGET, TESTED_COUNT
     
     while True:
         if not VALIDATION_QUEUE.empty() and HUNTING:
             ip, port = VALIDATION_QUEUE.get()
+            TESTED_COUNT += 1 # زيادة عداد ما تم فحصه
             
-            # 1. تشغيل Xray بهذا البروكسي
             restart_xray_with_proxy(ip, port)
-            
-            # 2. فحص الاتصال الحقيقي
             success, ping, country = test_connection_via_vpn()
             
             if success:
@@ -176,7 +170,6 @@ def validator_worker():
                 if proxy_str not in FOUND_WORKING_PROXIES:
                     FOUND_WORKING_PROXIES.append(proxy_str)
                     
-                    # إرسال إشعار فوري عند العثور على كنز
                     msg = (
                         f"💎 **FOUND GOLDEN PROXY!**\n"
                         f"━━━━━━━━━━━━━━━━\n"
@@ -187,7 +180,7 @@ def validator_worker():
                     )
                     requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", json={"chat_id": CHAT_ID_TARGET, "text": msg, "parse_mode": "Markdown"})
         else:
-            time.sleep(1) # استراحة إذا كان الطابور فارغاً
+            time.sleep(0.5)
 
 # ==========================================
 # --- 5. واجهة البوت والتقرير ---
@@ -196,13 +189,13 @@ def report_updater():
     global STATUS_MSG_ID
     while True:
         if HUNTING and CHAT_ID_TARGET:
-            q_size = VALIDATION_QUEUE.qsize()
             msg = (
-                f"📡 **Trojan Proxy Hunter**\n"
+                f"📡 **Advanced Proxy Hunter**\n"
                 f"━━━━━━━━━━━━━━━━\n"
-                f"🔍 Scanned IPs: `{SCANNED_COUNT}`\n"
-                f"⌛ Waiting Check: `{q_size}`\n"
-                f"✅ **Verified Working:** `{len(FOUND_WORKING_PROXIES)}`\n"
+                f"🔍 Scanned: `{SCANNED_COUNT}`\n"
+                f"🔫 **Raw Hits:** `{RAW_HITS_COUNT}`\n"  # هنا ستظهر الـ 35 وأكثر
+                f"🛠 Validated: `{TESTED_COUNT}`\n"     # هنا سترى أن المحقق يعمل
+                f"✅ **Verified:** `{len(FOUND_WORKING_PROXIES)}`\n"
                 f"━━━━━━━━━━━━━━━━\n"
                 f"⚠️ Scanning & validating live..."
             )
@@ -217,11 +210,11 @@ def report_updater():
         time.sleep(5)
 
 @app.route('/')
-def home(): return "Hunter-Validator Bot Running 🛡️"
+def home(): return "Hunter V3 Running 🛡️"
 
 @app.route('/' + TOKEN, methods=['POST'])
 def webhook():
-    global HUNTING, CHAT_ID_TARGET, FOUND_WORKING_PROXIES, SCANNED_COUNT, STATUS_MSG_ID
+    global HUNTING, CHAT_ID_TARGET, FOUND_WORKING_PROXIES, SCANNED_COUNT, RAW_HITS_COUNT, TESTED_COUNT, STATUS_MSG_ID
     try:
         data = request.json
         if "message" in data:
@@ -234,17 +227,17 @@ def webhook():
                     CHAT_ID_TARGET = chat_id
                     FOUND_WORKING_PROXIES = []
                     SCANNED_COUNT = 0
+                    RAW_HITS_COUNT = 0 # تصفير العدادات
+                    TESTED_COUNT = 0   # تصفير العدادات
                     STATUS_MSG_ID = None
                     
-                    # تفريغ الطابور القديم
                     with VALIDATION_QUEUE.mutex: VALIDATION_QUEUE.queue.clear()
                     
-                    # تشغيل الخيوط
                     threading.Thread(target=start_async_loop, args=(asyncio.new_event_loop(),), daemon=True).start()
                     threading.Thread(target=validator_worker, daemon=True).start()
                     threading.Thread(target=report_updater, daemon=True).start()
                     
-                    requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "🚀 **بدء الصيد والتحقق المزدوج!**\nسأخبرك فقط بالبروكسيات التي تنجح في تشغيل Trojan."})
+                    requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "🚀 **بدء الصيد الشفاف!**\nسترى الآن الفرق بين Hits وبين Verified."})
                 else:
                     requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "⚠️ الصيد يعمل بالفعل."})
             
