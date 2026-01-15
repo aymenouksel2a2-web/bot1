@@ -3,7 +3,6 @@ import requests
 import json
 import subprocess
 import time
-import threading
 from flask import Flask, request, jsonify
 
 # ==========================================
@@ -32,9 +31,8 @@ VLESS_CONFIG = {
     ]
 }
 
-# تشغيل الـ VPN في الخلفية
 def start_vpn():
-    xray_path = "./xray" # سيتم توفيره عبر Dockerfile
+    xray_path = "./xray"
     if not os.path.exists(xray_path):
         print("Xray binary not found! Check Dockerfile.")
         return
@@ -42,45 +40,63 @@ def start_vpn():
     with open("config.json", "w") as f:
         json.dump(VLESS_CONFIG, f, indent=4)
 
-    # تشغيل العملية
     subprocess.Popen([xray_path, "-c", "config.json"])
     print(">>> VPN Started on 127.0.0.1:10808")
-    time.sleep(3) # انتظار التجهيز
+    time.sleep(3) 
 
 # ==========================================
-# --- 2. إعدادات البوت ---
+# --- 2. إعدادات البوت والتحقق ---
 # ==========================================
 TOKEN = "8449140690:AAE6kMOXaKyVdcCi7uQTBHHienL2lWff5Q4"
 app = Flask(__name__)
 
-# البروكسي الذي سيستخدمه البوت للاتصال بتيليجرام
 PROXY = {
     "http": "socks5://127.0.0.1:10808",
     "https": "socks5://127.0.0.1:10808"
 }
 
+def get_connection_info():
+    """دالة لفحص معلومات الاتصال الحالية عبر البروكسي"""
+    try:
+        # نحاول الاتصال بموقع يعطينا معلومات الـ IP
+        # نستخدم البروكسي للتأكد أننا نخرج من الـ VPN
+        response = requests.get("http://ip-api.com/json", proxies=PROXY, timeout=10)
+        data = response.json()
+        
+        return {
+            "status": "✅ متصل (Connected)",
+            "ip": data.get("query", "Unknown"),
+            "country": data.get("country", "Unknown"),
+            "isp": data.get("isp", "Unknown"),
+            "region": data.get("regionName", "Unknown")
+        }
+    except Exception as e:
+        return {
+            "status": "❌ غير متصل (Disconnected)",
+            "error": str(e)
+        }
+
 def send_msg(chat_id, text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     try:
-        # نستخدم البروكسي هنا
         requests.post(url, json={"chat_id": chat_id, "text": text}, proxies=PROXY, timeout=10)
     except Exception as e:
         print(f"Error sending msg: {e}")
 
 def set_webhook():
-    """ضبط الويب هوك تلقائياً"""
     try:
-        # Koyeb يوفر هذا المتغير تلقائياً
         base_url = os.environ.get('KOYEB_APP_URL') 
         if base_url:
             if base_url.endswith('/'): base_url = base_url[:-1]
             webhook_url = f"{base_url}/{TOKEN}"
-            # الويب هوك نرسله بدون بروكسي لضمان الوصول
             requests.post(f"https://api.telegram.org/bot{TOKEN}/setWebhook", json={"url": webhook_url})
             print(f"Webhook set to: {webhook_url}")
     except:
         pass
 
+# ==========================================
+# --- 3. معالجة الرسائل ---
+# ==========================================
 @app.route('/')
 def home():
     return "Bot is running on VLESS Tunnel"
@@ -94,14 +110,30 @@ def webhook():
             text = data["message"].get("text", "")
             
             if text == "/start":
-                send_msg(chat_id, "Hello! I am connected via VLESS VPN 🛡️")
+                # فحص الاتصال عند كتابة start
+                send_msg(chat_id, "جاري فحص الاتصال... 🔎")
+                
+                info = get_connection_info()
+                
+                if "error" in info:
+                    msg = f"⚠️ **فشل الاتصال بالـ VPN**\nالخطأ: {info['error']}"
+                else:
+                    msg = (
+                        f"{info['status']}\n\n"
+                        f"🌍 **الدولة:** {info['country']}\n"
+                        f"🏙️ **المنطقة:** {info['region']}\n"
+                        f"🏢 **موزع الخدمة:** {info['isp']}\n"
+                        f"📟 **الآي بي:** `{info['ip']}`"
+                    )
+                
+                send_msg(chat_id, msg)
                 
         return jsonify({"ok": True})
     except:
         return jsonify({"ok": False})
 
 if __name__ == "__main__":
-    start_vpn() # تشغيل الـ VPN أولاً
+    start_vpn()
     set_webhook()
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
