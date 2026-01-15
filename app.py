@@ -8,7 +8,7 @@ import re
 from flask import Flask, request, jsonify
 
 # ==========================================
-# --- المتغيرات والإعدادات ---
+# --- الإعدادات ---
 # ==========================================
 TOKEN = "8449140690:AAE6kMOXaKyVdcCi7uQTBHHienL2lWff5Q4"
 app = Flask(__name__)
@@ -20,121 +20,118 @@ PROXY = {
 }
 
 # ==========================================
-# --- معالجة Xray (VLESS / VMESS / TROJAN) ---
+# --- معالجة Xray مع دعم الحقن (Injection) ---
 # ==========================================
 
 def parse_user_config(user_json):
-    """تحويل JSON المستخدم إلى إعدادات Xray مع دعم Trojan"""
+    """تحويل JSON مع دعم محاكاة الحقن (Injection Proxy)"""
     try:
         user_json = user_json.strip()
         data = json.loads(user_json)
         
         protocol = ""
         conf = {}
+        inject_conf = None
 
-        # 1. تحديد البروتوكول واستخراج الكونفيج الخام
+        # 1. تحديد البروتوكول واستخراج البيانات
         if "vlessTunnelConfig" in data or data.get("type") == "VLESS":
             protocol = "vless"
-            if "vlessTunnelConfig" in data:
-                conf = data["vlessTunnelConfig"].get("v2rayConfig", data["vlessTunnelConfig"])
-            else:
-                conf = data
-                
+            conf = data.get("vlessTunnelConfig", {}).get("v2rayConfig", data.get("vlessTunnelConfig", data))
         elif "vmessTunnelConfig" in data or data.get("type") == "VMESS":
             protocol = "vmess"
-            if "vmessTunnelConfig" in data:
-                conf = data["vmessTunnelConfig"].get("v2rayConfig", data["vmessTunnelConfig"])
-            else:
-                conf = data
-        
-        # --- إضافة دعم TROJAN هنا ---
+            conf = data.get("vmessTunnelConfig", {}).get("v2rayConfig", data.get("vmessTunnelConfig", data))
         elif "trojanTunnelConfig" in data or data.get("type") == "TROJAN":
             protocol = "trojan"
-            if "trojanTunnelConfig" in data:
-                conf = data["trojanTunnelConfig"].get("v2rayConfig", data["trojanTunnelConfig"])
-            else:
-                conf = data
+            conf = data.get("trojanTunnelConfig", {}).get("v2rayConfig", data.get("trojanTunnelConfig", data))
         else:
-            return None, "نوع السيرفر غير مدعوم (Unsupported Protocol)"
+            return None, "نوع السيرفر غير مدعوم"
 
-        # 2. استخراج البيانات المشتركة
+        # استخراج إعدادات الحقن إن وجدت
+        if "injectConfig" in data:
+            inject_conf = data["injectConfig"]
+        elif "vlessTunnelConfig" in data and "injectConfig" in data["vlessTunnelConfig"]:
+            inject_conf = data["vlessTunnelConfig"]["injectConfig"]
+        elif "trojanTunnelConfig" in data and "injectConfig" in data["trojanTunnelConfig"]:
+            inject_conf = data["trojanTunnelConfig"]["injectConfig"]
+
+        # بيانات السيرفر الأساسي
         address = conf.get("host") or conf.get("address") or conf.get("wsHeaderHost")
         port = int(conf.get("port", 443))
-        
-        # Trojan يستخدم password، بينما Vless/Vmess يستخدمون id/uuid
-        # سنحاول استخراج أيهما موجود
         uuid_or_password = conf.get("password") or conf.get("uuid") or conf.get("id")
-        
         path = conf.get("wsPath") or conf.get("path") or "/"
         sni = conf.get("serverNameIndication") or conf.get("sni") or ""
         host_header = conf.get("wsHeaderHost") or conf.get("host") or address
 
-        # 3. تصحيح SNI الذكي (لإعدادات Cloud Run)
-        if address and "run.app" in address and ("youtube" in sni or "google" in sni):
-            print(f">>> Auto-Fixing SNI: Changed from {sni} to {address}")
-            sni = address
-            host_header = address
-
-        # 4. بناء هيكل الإعدادات (Settings) حسب البروتوكول
-        outbound_settings = {}
+        # ---------------------------------------------------------
+        # بناء قائمة Outbounds
+        # ---------------------------------------------------------
+        outbounds = []
         
+        # إعدادات الاتصال بالسيرفر الأصلي (Main Outbound)
+        main_outbound_settings = {}
         if protocol == "trojan":
-            # هيكل Trojan يختلف قليلاً (servers بدلاً من vnext)
-            outbound_settings = {
-                "servers": [{
-                    "address": address,
-                    "port": port,
-                    "password": uuid_or_password,
-                    "email": "trojan@xray.com" # مجرد حقل شكلي
-                }]
+            main_outbound_settings = {
+                "servers": [{"address": address, "port": port, "password": uuid_or_password}]
             }
         else:
-            # هيكل VMESS و VLESS
-            outbound_settings = {
-                "vnext": [{
-                    "address": address,
-                    "port": port,
-                    "users": [{
-                        "id": uuid_or_password,
-                        "encryption": "none",
-                        "security": "auto"
-                    }]
-                }]
+            main_outbound_settings = {
+                "vnext": [{"address": address, "port": port, "users": [{"id": uuid_or_password, "encryption": "none", "security": "auto"}]}]
             }
-            # إضافة alterId لـ VMESS فقط
-            if protocol == "vmess":
-                outbound_settings["vnext"][0]["users"][0]["alterId"] = 0
+            if protocol == "vmess": main_outbound_settings["vnext"][0]["users"][0]["alterId"] = 0
 
-        # 5. تجميع الـ Outbound النهائي
-        outbound = {
+        main_outbound = {
             "protocol": protocol,
-            "settings": outbound_settings,
+            "settings": main_outbound_settings,
             "streamSettings": {
-                "network": "ws" if path != "/" else "tcp", # تخمين نوع الشبكة
+                "network": "ws" if path != "/" else "tcp",
                 "security": "tls",
-                "tlsSettings": {
-                    "serverName": sni,
-                    "allowInsecure": True
-                },
-                "wsSettings": {
-                    "path": path,
-                    "headers": {
-                        "Host": host_header
-                    }
-                } if path != "/" else None # إضافة wsSettings فقط إذا كان هناك مسار
+                "tlsSettings": {"serverName": sni, "allowInsecure": True},
+                "wsSettings": {"path": path, "headers": {"Host": host_header}} if path != "/" else None
             }
         }
-        
+
+        # --- منطق المحاكاة (Injection Logic) ---
+        # إذا كان الحقن مفعل، نقوم بتوجيه الاتصال عبر البروكسي
+        proxy_info = ""
+        if inject_conf and inject_conf.get("enabled") == True:
+            proxy_host = inject_conf.get("proxyHost")
+            proxy_port = int(inject_conf.get("proxyPort", 80))
+            
+            if proxy_host:
+                print(f">>> Simulating Injection via: {proxy_host}:{proxy_port}")
+                proxy_info = f" (عبر الحقن: {proxy_host})"
+                
+                # 1. نضيف إعدادات البروكسي للسيرفر الأصلي
+                main_outbound["proxySettings"] = {
+                    "tag": "injector_proxy" # هذا يربطه بالخروج الثاني
+                }
+                
+                # 2. إنشاء Outbound خاص بالحقن (HTTP Proxy)
+                injector_outbound = {
+                    "tag": "injector_proxy",
+                    "protocol": "http", # أغلب تطبيقات الحقن تستخدم HTTP Proxy
+                    "settings": {
+                        "servers": [{
+                            "address": proxy_host,
+                            "port": proxy_port
+                        }]
+                    }
+                }
+                outbounds.append(injector_outbound)
+
+        # نضيف السيرفر الأساسي كأول مخرج
+        outbounds.insert(0, main_outbound)
+
         final_config = {
             "log": {"loglevel": "warning"},
             "inbounds": [{"port": 10808, "listen": "127.0.0.1", "protocol": "socks", "settings": {"udp": True}}],
-            "outbounds": [outbound]
+            "outbounds": outbounds
         }
         
-        return final_config, None
+        return final_config, None, proxy_info
 
     except Exception as e:
-        return None, f"خطأ في تحليل البيانات: {str(e)}"
+        return None, f"خطأ: {str(e)}", ""
 
 def restart_vpn(config_dict):
     global xray_process
@@ -157,28 +154,19 @@ def restart_vpn(config_dict):
 def check_connection():
     try:
         start_time = time.time()
-        # زدنا المهلة لضمان الاتصال
         response = requests.get("http://ip-api.com/json", proxies=PROXY, timeout=10)
         ping = int((time.time() - start_time) * 1000)
         data = response.json()
-        return {
-            "success": True,
-            "ping": ping,
-            "ip": data.get("query", "Unknown"),
-            "country": data.get("country", "Unknown"),
-            "isp": data.get("isp", "Unknown")
-        }
+        return {"success": True, "ping": ping, "country": data.get("country"), "ip": data.get("query")}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
 # ==========================================
 # --- البوت ---
 # ==========================================
-
 def send_msg(chat_id, text):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     try:
-        requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=5)
+        requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", json={"chat_id": chat_id, "text": text}, timeout=5)
     except: pass
 
 def set_webhook():
@@ -186,12 +174,11 @@ def set_webhook():
         base_url = os.environ.get('KOYEB_APP_URL') 
         if base_url:
             if base_url.endswith('/'): base_url = base_url[:-1]
-            webhook_url = f"{base_url}/{TOKEN}"
-            requests.post(f"https://api.telegram.org/bot{TOKEN}/setWebhook", json={"url": webhook_url})
+            requests.post(f"https://api.telegram.org/bot{TOKEN}/setWebhook", json={"url": f"{base_url}/{TOKEN}"})
     except: pass
 
 @app.route('/')
-def home(): return "Bot Running with Trojan Support 🚀"
+def home(): return "Bot Running (Dark Tunnel Simulation Mode) 📱"
 
 @app.route('/' + TOKEN, methods=['POST'])
 def webhook():
@@ -202,32 +189,35 @@ def webhook():
             text = data["message"].get("text", "")
             
             if text == "/start":
-                send_msg(chat_id, "أهلاً! البوت الآن يدعم:\n✅ VLESS\n✅ VMESS\n✅ TROJAN\n\nأرسل الكود باستخدام `/add` للتجربة.")
+                send_msg(chat_id, "وضع محاكاة Dark Tunnel مفعل 📱\nأرسل الكود وسأحاول الاتصال عبر البروكسي (Inject) الموجود فيه.")
 
             elif text.startswith("/add"):
                 raw_json = text.replace("/add", "", 1).strip()
                 if not raw_json: return jsonify({"ok": True})
 
-                send_msg(chat_id, "⚙️ جاري تحليل الإعدادات...")
+                send_msg(chat_id, "⚙️ جاري التحليل ومحاولة الحقن...")
                 
-                new_config, error = parse_user_config(raw_json)
+                new_config, error, proxy_info = parse_user_config(raw_json)
+                
                 if error:
-                    send_msg(chat_id, f"❌ خطأ:\n{error}")
+                    send_msg(chat_id, f"❌ خطأ JSON:\n{error}")
                 else:
                     if restart_vpn(new_config):
                         info = check_connection()
                         if info["success"]:
                             msg = (
-                                f"✅ **تم الاتصال بنجاح!**\n"
-                                f"📡 البروتوكول: {new_config['outbounds'][0]['protocol'].upper()}\n"
+                                f"✅ **تم الاتصال بنجاح!**{proxy_info}\n"
+                                f"النوع: {new_config['outbounds'][0]['protocol'].upper()}\n"
                                 f"⚡️ `{info['ping']}ms` | 🌍 {info['country']}\n"
                                 f"📟 IP: `{info['ip']}`"
                             )
                             send_msg(chat_id, msg)
                         else:
-                            send_msg(chat_id, f"❌ فشل الاتصال:\n{info['error']}")
+                            # هنا ستظهر النتيجة الحقيقية إذا كان البروكسي لا يعمل
+                            msg = f"❌ **فشل الاتصال (مثل الهاتف تماماً)**\n\nالسبب: البوت حاول الاتصال عبر البروكسي {proxy_info} ولكنه فشل.\nالخطأ: {info['error']}"
+                            send_msg(chat_id, msg)
                     else:
-                        send_msg(chat_id, "❌ مشكلة في تشغيل xray")
+                        send_msg(chat_id, "❌ مشكلة في xray")
 
         return jsonify({"ok": True})
     except: return jsonify({"ok": False})
