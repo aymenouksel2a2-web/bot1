@@ -17,9 +17,9 @@ from queue import Queue
 TOKEN = "8449140690:AAE6kMOXaKyVdcCi7uQTBHHienL2lWff5Q4" 
 
 # بيانات سيرفر التروجان (تأكد أنها تعمل 100% وإلا لن ينجح أي فحص)
-TROJAN_HOST = "SC-France1.09vpn.com"
-TROJAN_PORT = 2083
-TROJAN_PASS = "u1023645402"
+TROJAN_HOST = "SC-France2.09vpn.com"
+TROJAN_PORT = 7070
+TROJAN_PASS = "u2448829982"
 TROJAN_SNI  = "youtube.com"
 PAYLOAD_HOST = "youtube.com"
 
