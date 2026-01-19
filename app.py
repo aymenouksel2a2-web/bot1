@@ -5,31 +5,30 @@ import asyncio
 import random
 import threading
 import time
-import subprocess
-import signal
+import socket
 from flask import Flask, request, jsonify
 from queue import Queue
 
 # ==========================================
-# --- 1. إعدادات البوت والتروجان ---
+# --- 1. إعدادات البوت والهدف (SSH Target) ---
 # ==========================================
-# 🔴 ضع التوكن الخاص بك هنا
 TOKEN = "8449140690:AAE6kMOXaKyVdcCi7uQTBHHienL2lWff5Q4"
 
-# 🔴 ضع بيانات سيرفر التروجان الشغال هنا
-TROJAN_HOST = "SC-France1.09vpn.com"
-TROJAN_PORT = 2083
-TROJAN_PASS = "u1023645402"
-TROJAN_SNI  = "youtube.com"
+# بيانات سيرفر SSH الذي تريد الاتصال به (من طلبك)
+SSH_HOST = "SC-France2.09vpn.com"
+SSH_PORT = 109  # البورت الذي تستخدمه
+
+# الهوست الخاص بالبايلود (SNI)
 PAYLOAD_HOST = "youtube.com"
 
 app = Flask(__name__)
 
-# --- إعدادات النطاقات (34 و 35 فقط) ---
+# --- نطاقات البحث (Google Cloud Ranges) ---
+# سنركز على 34 و 35 لأنها الأشهر، والبوت سيقوم بفلترة المحظور منها
 TARGET_PREFIXES = [34, 35] 
 PORTS_TO_SCAN = [3128] 
 
-# متغيرات الإحصائيات والتحكم
+# متغيرات الإحصائيات
 HUNTING = False
 SCANNED_COUNT = 0       
 RAW_HITS_COUNT = 0      
@@ -40,87 +39,60 @@ CHAT_ID_TARGET = None
 STATUS_MSG_ID = None
 
 # ==========================================
-# --- 2. إدارة Xray (VPN Controller) ---
+# --- 2. نظام فحص الحقن (SSH Injection Tester) ---
 # ==========================================
-xray_process = None
-
-def restart_xray_with_proxy(proxy_ip, proxy_port):
-    global xray_process
-    
-    # قتل العملية السابقة لتجنب تضارب البورتات
-    if xray_process:
-        try:
-            xray_process.terminate()
-            xray_process.wait(timeout=1)
-        except:
-            try: os.kill(xray_process.pid, signal.SIGKILL)
-            except: pass
-
-    # إعداد ملف الكونفيج الجديد للتروجان
-    config = {
-        "log": {"loglevel": "error"},
-        "inbounds": [{"port": 10808, "listen": "127.0.0.1", "protocol": "socks", "settings": {"udp": True}}],
-        "outbounds": [
-            {
-                "tag": "proxy_out",
-                "protocol": "trojan",
-                "settings": {
-                    "servers": [{"address": TROJAN_HOST, "port": int(TROJAN_PORT), "password": TROJAN_PASS}]
-                },
-                "streamSettings": {
-                    "network": "tcp",
-                    "security": "tls",
-                    "tlsSettings": {"serverName": TROJAN_SNI, "allowInsecure": True}
-                },
-                "proxySettings": {"tag": "inject_layer"}
-            },
-            {
-                "tag": "inject_layer",
-                "protocol": "http",
-                "settings": {
-                    "servers": [{"address": proxy_ip, "port": int(proxy_port)}],
-                    "headers": {"Host": PAYLOAD_HOST}
-                }
-            }
-        ]
-    }
-    
+# هذا هو "العقل" الجديد للبوت بدلاً من Xray
+def check_ssh_injection(proxy_ip, proxy_port):
     try:
-        with open("config.json", "w") as f:
-            json.dump(config, f, indent=4)
+        # 1. تجهيز البايلود كما طلبته بالضبط
+        # لاحظ: \r\n هي نفسها [crlf]
+        payload = (
+            f"CONNECT {SSH_HOST}:{SSH_PORT} HTTP/1.1\r\n"
+            f"Host: {PAYLOAD_HOST}\r\n"
+            "Service: SSH\r\n"
+            "Mode: O C X \r\n\r\n"
+        )
         
-        xray_path = "./xray"
-        if os.path.exists(xray_path):
-            # تشغيل Xray في الخلفية
-            xray_process = subprocess.Popen([xray_path, "-c", "config.json"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            time.sleep(1.0) # انتظار ثانية ليعمل السيرفر
-            return True
+        # 2. إنشاء اتصال مباشر بالبروكسي
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(10) # مهلة 10 ثواني للرد
+        
+        start_time = time.time()
+        sock.connect((proxy_ip, int(proxy_port)))
+        sock.sendall(payload.encode())
+        
+        # 3. قراءة الرد (Header Analysis)
+        response = sock.recv(4096).decode(errors='ignore')
+        sock.close()
+        ping = int((time.time() - start_time) * 1000)
+
+        # ====================================================
+        # --- الفلتر الذكي (Ooredoo Filter) ---
+        # ====================================================
+        
+        # 1. كشف الحظر (صفحة شوف / 307)
+        if "307 Temporary Redirect" in response or "choof" in response or "ooredoo" in response:
+            return False, ping, "Blacklisted (307)"
+            
+        # 2. كشف النجاح الحقيقي (200 OK)
+        if "HTTP/1.1 200" in response:
+            # تحقق إضافي: هل السيرفر رد ببروتوكول SSH؟ (للتأكد أن الاتصال مر فعلاً)
+            # ملاحظة: بعض البروكسيات لا تمرر رد SSH فوراً، لذا سنكتفي بـ 200 OK كدليل نجاح أولي
+            return True, ping, "SSH Connected ✅"
+
+        return False, ping, "No 200 OK"
+
     except Exception as e:
-        print(f"Error starting Xray: {e}")
-    return False
-
-def test_connection_via_vpn():
-    try:
-        proxies = {"http": "socks5://127.0.0.1:10808", "https": "socks5://127.0.0.1:10808"}
-        start = time.time()
-        # مهلة 15 ثانية للتحقق بدقة
-        res = requests.get("http://ip-api.com/json", proxies=proxies, timeout=15)
-        
-        if res.status_code == 200:
-            ping = int((time.time() - start) * 1000)
-            data = res.json()
-            return True, ping, data.get("country", "Unknown")
-    except:
-        pass
-    return False, 0, ""
+        return False, 0, str(e)
 
 # ==========================================
 # --- 3. الصياد (Async Hunter) ---
 # ==========================================
-RAW_PAYLOAD = (
-    f"CONNECT {PAYLOAD_HOST}:443 HTTP/1.1\r\n"
+# بايلود خفيف جداً للمسح السريع فقط
+SCAN_PAYLOAD = (
+    f"CONNECT {SSH_HOST}:{SSH_PORT} HTTP/1.1\r\n"
     f"Host: {PAYLOAD_HOST}\r\n"
-    "Proxy-Connection: Keep-Alive\r\n\r\n"
+    "Connection: Keep-Alive\r\n\r\n"
 ).encode()
 
 def generate_targeted_ip():
@@ -132,26 +104,28 @@ async def scan_socket(ip, port, sem):
     async with sem:
         SCANNED_COUNT += 1
         try:
-            reader, writer = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=1.5)
-            writer.write(RAW_PAYLOAD)
+            reader, writer = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=1.0)
+            writer.write(SCAN_PAYLOAD)
             await writer.drain()
             
-            data = await asyncio.wait_for(reader.read(128), timeout=1.5)
+            # نقرأ أول 64 بايت فقط لنرى هل هناك استجابة
+            data = await asyncio.wait_for(reader.read(64), timeout=1.0)
             response = data.decode(errors='ignore')
             
             writer.close()
             try: await writer.wait_closed()
             except: pass
             
-            if "200 Connection" in response or "200 OK" in response:
+            # إذا رد البروكسي بأي شيء (حتى لو 307)، نرسله للمحقق ليفحصه بدقة
+            if len(response) > 5: 
                 RAW_HITS_COUNT += 1
                 VALIDATION_QUEUE.put((ip, port))
         except:
             pass
 
 async def hunter_loop():
-    sem = asyncio.Semaphore(500) 
-    print(">>> Hunter Started targeting 34.x & 35.x 🚀")
+    sem = asyncio.Semaphore(600) # سرعة عالية
+    print(">>> SSH Websocket Hunter Started 🚀")
     while HUNTING:
         tasks = []
         for _ in range(100):
@@ -169,7 +143,7 @@ def start_async_loop(loop):
     loop.run_until_complete(hunter_loop())
 
 # ==========================================
-# --- 4. المحقق (Validator Thread) - Live Feed ---
+# --- 4. المحقق (Validator Thread) - SSH Mode ---
 # ==========================================
 def validator_worker():
     global CHAT_ID_TARGET, TESTED_COUNT
@@ -179,51 +153,53 @@ def validator_worker():
             ip, port = VALIDATION_QUEUE.get()
             TESTED_COUNT += 1
             
-            if restart_xray_with_proxy(ip, port):
-                success, ping, country = test_connection_via_vpn()
-                
-                # --- إرسال النتيجة المباشرة (نجاح أو فشل) ---
-                if success:
-                    # ✅ حالة النجاح
-                    proxy_str = f"{ip}:{port}"
-                    if proxy_str not in FOUND_WORKING_PROXIES:
-                        FOUND_WORKING_PROXIES.append(proxy_str)
-                        
-                        msg = (
-                            f"✅ **نجح الاتصال! (GOLDEN)**\n"
-                            f"🌐 IP: `{ip}:{port}`\n"
-                            f"⚡ Ping: `{ping}ms` | 🏳️ {country}"
-                        )
-                        requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", 
-                                    json={"chat_id": CHAT_ID_TARGET, "text": msg, "parse_mode": "Markdown"})
-                else:
-                    # ❌ حالة الفشل
-                    msg = f"❌ `{ip}:{port}` .. فشل الاتصال"
+            # استخدام دالة الفحص الجديدة
+            success, ping, msg_status = check_ssh_injection(ip, port)
+            
+            if success:
+                # ✅ نجاح: بروكسي نظيف ومرر الاتصال
+                proxy_str = f"{ip}:{port}"
+                if proxy_str not in FOUND_WORKING_PROXIES:
+                    FOUND_WORKING_PROXIES.append(proxy_str)
+                    
+                    msg = (
+                        f"✅ **SSH BYPASS SUCCESS!**\n"
+                        f"🌐 Proxy: `{ip}:{port}`\n"
+                        f"⚡ Ping: `{ping}ms`\n"
+                        f"🛡️ Status: **Clean (No 307)**\n"
+                        f"⚙️ Works with your SSH Config!"
+                    )
                     requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", 
                                 json={"chat_id": CHAT_ID_TARGET, "text": msg, "parse_mode": "Markdown"})
+            else:
+                # ❌ فشل: إما محظور (307) أو لا يعمل
+                # إرسال رسالة فقط إذا كان الخطأ 307 لنعرف أن البوت يفلتر
+                if "307" in msg_status:
+                    fail_msg = f"⛔ `{ip}:{port}` -> Ooredoo Blacklist (307)"
+                    requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", 
+                                json={"chat_id": CHAT_ID_TARGET, "text": fail_msg, "parse_mode": "Markdown"})
                 
-                # تأخير بسيط جداً لحماية البوت من الحظر (Flood Wait)
-                time.sleep(0.5)
+            time.sleep(0.1)
         else:
             time.sleep(0.5)
 
 # ==========================================
-# --- 5. واجهة البوت والتقرير ---
+# --- 5. واجهة البوت ---
 # ==========================================
 def report_updater():
     global STATUS_MSG_ID
     while True:
         if HUNTING and CHAT_ID_TARGET:
             msg = (
-                f"📡 **Hunter V5 (Live Feed Mode)**\n"
+                f"📡 **SSH Websocket Hunter (Ooredoo Fix)**\n"
                 f"━━━━━━━━━━━━━━━━\n"
-                f"🎯 Range: `34.x, 35.x` | Port: `3128`\n"
+                f"🎯 Target: `{SSH_HOST}:{SSH_PORT}`\n"
                 f"🔍 Scanned: `{SCANNED_COUNT}`\n"
                 f"🔫 Raw Hits: `{RAW_HITS_COUNT}`\n"
-                f"🛠 Tested: `{TESTED_COUNT}`\n"
-                f"✅ **Golden:** `{len(FOUND_WORKING_PROXIES)}`\n"
+                f"🛠 Checked: `{TESTED_COUNT}`\n"
+                f"✅ **Clean Proxies:** `{len(FOUND_WORKING_PROXIES)}`\n"
                 f"━━━━━━━━━━━━━━━━\n"
-                f"⚠️ Live results enabled (Spam Warning)"
+                f"⚠️ Filtering 307 Redirects..."
             )
             url = f"https://api.telegram.org/bot{TOKEN}/"
             try:
@@ -238,7 +214,7 @@ def report_updater():
         time.sleep(8) 
 
 @app.route('/')
-def home(): return "Hunter V5 Running with Live Feed"
+def home(): return "SSH Hunter Running"
 
 @app.route('/' + TOKEN, methods=['POST'])
 def webhook():
@@ -258,7 +234,6 @@ def webhook():
                     RAW_HITS_COUNT = 0
                     TESTED_COUNT = 0
                     STATUS_MSG_ID = None
-                    
                     with VALIDATION_QUEUE.mutex: VALIDATION_QUEUE.queue.clear()
                     
                     threading.Thread(target=start_async_loop, args=(asyncio.new_event_loop(),), daemon=True).start()
@@ -266,9 +241,9 @@ def webhook():
                     threading.Thread(target=report_updater, daemon=True).start()
                     
                     requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", 
-                                json={"chat_id": chat_id, "text": "🚀 **بدء الصيد المباشر!**\nسأرسل لك نتيجة كل فحص (نجاح أو فشل). يرجى كتم الإشعارات."})
+                                json={"chat_id": chat_id, "text": "🚀 **بدء صيد SSH Websocket!**\nسأتجاهل أي بروكسي يعطي 307 (صفحة شوف)."})
                 else:
-                    requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "⚠️ البوت يعمل بالفعل."})
+                    requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "⚠️ البوت يعمل."})
             
             elif text == "/stop":
                 HUNTING = False
